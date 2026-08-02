@@ -7,6 +7,8 @@ use alloc::vec::Vec;
 use bincode::Options;
 #[cfg(feature = "hosted")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "hosted")]
+use std::io::Read;
 
 use crate::font::Font;
 use crate::host_api::{
@@ -467,6 +469,48 @@ impl RfvpCore {
         }
         self.pending_events.push(event);
         Ok(())
+    }
+
+    /// Reads one logical RFVP resource from the session-owned pack index.
+    ///
+    /// Pack bytes are still obtained through the embedding's `RfvpHost` file
+    /// port that was used at boot; this method only resolves the bounded
+    /// archive entry metadata retained by the core. It never opens an ambient
+    /// filesystem path.
+    #[cfg(feature = "hosted")]
+    pub fn read_hosted_resource(
+        &self,
+        resource_uri: &str,
+        max_bytes: usize,
+    ) -> RfvpResult<Vec<u8>> {
+        if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let (mut stream, known_len) = self
+            .game_data
+            .vfs
+            .open_stream_with_len(resource_uri)
+            .map_err(|_| RfvpError::NotFound)?;
+        if known_len.is_some_and(|len| len > max_bytes as u64) {
+            return Err(RfvpError::CapacityExceeded);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or(RfvpError::CapacityExceeded)? as u64;
+        let capacity = known_len
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or_default();
+        let mut bytes = Vec::with_capacity(capacity);
+        stream
+            .by_ref()
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RfvpError::Io)?;
+        if bytes.len() > max_bytes {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        Ok(bytes)
     }
 
     pub fn clear_events(&mut self) {

@@ -278,7 +278,11 @@ impl HostedSession {
         if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
             return Err(RfvpError::InvalidArgument);
         }
-        host.fs().open(resource_uri)?.read_to_vec(max_bytes)
+        match host.fs().open(resource_uri) {
+            Ok(mut file) => file.read_to_vec(max_bytes),
+            Err(RfvpError::NotFound) => self.core.read_hosted_resource(resource_uri, max_bytes),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn snapshot(&self) -> RfvpResult<HostedSnapshot> {
