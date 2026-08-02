@@ -12,7 +12,7 @@ const MAX_HOSTED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::host_api::{
     AudioParams, AudioStreamDesc, AudioStreamId, ColorRgba, DrawSolidCommand, DrawSpriteCommand,
-    EncodedAudioKind, PixelFormat, PlatformCallbacks, RfvpAudio, RfvpError, RfvpEvent,
+    EncodedAudioKind, PixelFormat, PlatformCallbacks, RfvpAudio, RfvpError, RfvpEvent, RfvpFile,
     RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer, RfvpResult, TextureDesc, TextureId,
     TextureRect,
 };
@@ -267,11 +267,18 @@ impl HostedSession {
         self.core.complete_hosted_video()
     }
 
-    /// Resolve and read a game resource through the boot-bound RFVP VFS.
-    /// Embeddings must still apply their own policy and response budgets
-    /// before invoking it and before passing its result to a backend.
-    pub fn read_resource(&mut self, resource_uri: &str, max_bytes: usize) -> RfvpResult<Vec<u8>> {
-        self.core.read_hosted_resource(resource_uri, max_bytes)
+    /// Resolves a resource through the embedding-owned host port. The RFVP
+    /// core never accesses an ambient or process-owned filesystem.
+    pub fn read_resource<H: RfvpHost>(
+        &mut self,
+        host: &mut H,
+        resource_uri: &str,
+        max_bytes: usize,
+    ) -> RfvpResult<Vec<u8>> {
+        if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        host.fs().open(resource_uri)?.read_to_vec(max_bytes)
     }
 
     pub fn snapshot(&self) -> RfvpResult<HostedSnapshot> {

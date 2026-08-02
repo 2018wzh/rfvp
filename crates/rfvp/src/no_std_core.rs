@@ -7,8 +7,6 @@ use alloc::vec::Vec;
 use bincode::Options;
 #[cfg(feature = "hosted")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "hosted")]
-use std::io::Read;
 
 use crate::font::Font;
 use crate::host_api::{
@@ -332,38 +330,6 @@ impl RfvpCore {
             .stop(&mut self.game_data.motion_manager);
         self.game_data.set_halt(false);
         Ok(())
-    }
-
-    /// Reads a resolved RFVP resource through the session VFS. This is a
-    /// bounded host port: it accepts neither native paths nor a mutable VFS
-    /// handle, and it never exposes a packed-file reader outside the core.
-    #[cfg(feature = "hosted")]
-    pub fn read_hosted_resource(
-        &mut self,
-        resource_uri: &str,
-        max_bytes: usize,
-    ) -> RfvpResult<Vec<u8>> {
-        if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
-            return Err(RfvpError::InvalidArgument);
-        }
-        let mut stream = self
-            .game_data
-            .vfs
-            .open_stream(resource_uri)
-            .map_err(|_| RfvpError::NotFound)?;
-        let mut bytes = Vec::new();
-        let limit = u64::try_from(max_bytes)
-            .map_err(|_| RfvpError::CapacityExceeded)?
-            .saturating_add(1);
-        stream
-            .by_ref()
-            .take(limit)
-            .read_to_end(&mut bytes)
-            .map_err(|_| RfvpError::Io)?;
-        if bytes.len() > max_bytes {
-            return Err(RfvpError::CapacityExceeded);
-        }
-        Ok(bytes)
     }
 
     #[cfg(feature = "hosted")]
