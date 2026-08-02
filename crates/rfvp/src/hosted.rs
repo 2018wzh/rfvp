@@ -18,8 +18,8 @@ use crate::host_api::{
 };
 #[cfg(feature = "hosted")]
 pub use crate::no_std_core::{
-    HostedCoreSnapshot as HostedSnapshot, HostedStateComponentHashesV1,
-    HOSTED_CORE_SNAPSHOT_VERSION,
+    HOSTED_CORE_SNAPSHOT_VERSION, HostedCoreSnapshot as HostedSnapshot,
+    HostedStateComponentHashesV1,
 };
 pub use crate::no_std_core::{
     RfvpBootConfig as HostedBootConfig, RfvpCore, RfvpCoreConfig as HostedConfig,
@@ -208,6 +208,10 @@ pub trait HostedStepObserver {
 pub struct HostedSession {
     core: RfvpCore,
     limits: HostedLimits,
+    // Renderer identity must outlive one captured delta. The core legitimately
+    // reuses texture ids across ticks; recreating this recorder per tick turns
+    // those updates into duplicate creates at every embedding boundary.
+    renderer: RecordingRenderer,
 }
 
 impl HostedSession {
@@ -224,7 +228,11 @@ impl HostedSession {
         }
         let mut core = RfvpCore::new(config);
         core.set_hosted_text_limits(limits.max_text_operations, limits.max_text_bytes);
-        Ok(Self { core, limits })
+        Ok(Self {
+            core,
+            limits,
+            renderer: RecordingRenderer::new(limits),
+        })
     }
 
     pub fn core(&self) -> &RfvpCore {
@@ -292,6 +300,7 @@ impl HostedSession {
     pub fn restore(&mut self, snapshot: &HostedSnapshot) -> RfvpResult<()> {
         self.core.restore_hosted_snapshot(snapshot)?;
         self.core.invalidate_host_render_cache();
+        self.renderer.reset_resources();
         Ok(())
     }
 
@@ -346,6 +355,7 @@ impl HostedSession {
             return Err(RfvpError::InvalidData);
         }
         self.core.invalidate_host_render_cache();
+        self.renderer.reset_resources();
         Ok(())
     }
 
@@ -364,9 +374,12 @@ impl HostedSession {
             self.core.push_event(event)?;
         }
 
-        let mut recording = RecordingHost::new(host, self.limits);
-        let tick = self.core.tick(&mut recording)?;
-        recording.finish()?;
+        let renderer = std::mem::replace(&mut self.renderer, RecordingRenderer::new(self.limits));
+        let mut recording = RecordingHost::with_renderer(host, renderer, self.limits);
+        let tick_result = self.core.tick(&mut recording);
+        let finish_result = tick_result.and_then(|tick| recording.finish().map(|()| tick));
+        self.renderer = recording.renderer;
+        let tick = finish_result?;
         let text = self
             .core
             .take_hosted_text_events()
@@ -378,7 +391,7 @@ impl HostedSession {
             .collect::<Vec<_>>();
         Ok(HostedStepDelta {
             tick,
-            scene: recording.renderer.operations,
+            scene: self.renderer.take_operations(),
             audio: recording.audio.operations,
             video: self
                 .core
@@ -453,6 +466,34 @@ mod tests {
                 if resource_uri == "audio/theme.ogg"
         ));
     }
+
+    #[test]
+    fn recording_renderer_preserves_texture_identity_across_deltas() {
+        let mut renderer = RecordingRenderer::new(HostedLimits::default());
+        let desc = TextureDesc {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            mip_count: 1,
+        };
+        let pixels = [1, 2, 3, 4];
+
+        renderer
+            .create_texture(TextureId(7), desc, Some(&pixels))
+            .expect("the first texture write is accepted");
+        assert!(matches!(
+            renderer.take_operations().as_slice(),
+            [HostedSceneOperation::CreateTexture(texture)] if texture.id == TextureId(7)
+        ));
+
+        renderer
+            .create_texture(TextureId(7), desc, Some(&pixels))
+            .expect("a same-id texture write is an update");
+        assert!(matches!(
+            renderer.take_operations().as_slice(),
+            [HostedSceneOperation::UpdateTexture(update)] if update.id == TextureId(7)
+        ));
+    }
 }
 
 struct RecordingHost<'a, H: RfvpHost> {
@@ -466,6 +507,14 @@ impl<'a, H: RfvpHost> RecordingHost<'a, H> {
         Self {
             inner,
             renderer: RecordingRenderer::new(limits),
+            audio: RecordingAudio::new(limits),
+        }
+    }
+
+    fn with_renderer(inner: &'a mut H, renderer: RecordingRenderer, limits: HostedLimits) -> Self {
+        Self {
+            inner,
+            renderer,
             audio: RecordingAudio::new(limits),
         }
     }
@@ -537,6 +586,18 @@ impl RecordingRenderer {
 
     fn finish(&self) -> RfvpResult<()> {
         self.failure.map_or(Ok(()), Err)
+    }
+
+    fn take_operations(&mut self) -> Vec<HostedSceneOperation> {
+        self.texture_bytes = 0;
+        std::mem::take(&mut self.operations)
+    }
+
+    fn reset_resources(&mut self) {
+        self.texture_bytes = 0;
+        self.operations.clear();
+        self.textures.clear();
+        self.failure = None;
     }
 
     fn reserve_texture_bytes(&mut self, additional: usize) -> RfvpResult<()> {
