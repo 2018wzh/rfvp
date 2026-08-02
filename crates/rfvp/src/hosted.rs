@@ -136,6 +136,17 @@ pub enum HostedAudioOperation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedVideoOperation {
+    Play {
+        resource_uri: String,
+        byte_len: u64,
+        modal_with_audio: bool,
+        stage_width: u32,
+        stage_height: u32,
+    },
+}
+
 /// The only presentation and audio result produced by one hosted step.
 ///
 /// An embedding may convert this into its own ABI payload, but must not commit
@@ -145,6 +156,7 @@ pub struct HostedStepDelta {
     pub tick: HostedTickResult,
     pub scene: Vec<HostedSceneOperation>,
     pub audio: Vec<HostedAudioOperation>,
+    pub video: Vec<HostedVideoOperation>,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -264,6 +276,21 @@ impl HostedSession {
             tick,
             scene: recording.renderer.operations,
             audio: recording.audio.operations,
+            video: self
+                .core
+                .take_hosted_video_commands()
+                .into_iter()
+                .map(|command| HostedVideoOperation::Play {
+                    resource_uri: command.resource_uri,
+                    byte_len: command.byte_len,
+                    modal_with_audio: matches!(
+                        command.mode,
+                        crate::subsystem::resources::videoplayer::MovieMode::ModalWithAudio
+                    ),
+                    stage_width: command.screen_w,
+                    stage_height: command.screen_h,
+                })
+                .collect(),
         })
     }
 

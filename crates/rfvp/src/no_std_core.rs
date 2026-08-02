@@ -216,6 +216,17 @@ impl RfvpCore {
     }
 
     #[cfg(feature = "hosted")]
+    pub fn take_hosted_video_commands(
+        &mut self,
+    ) -> Vec<crate::subsystem::resources::videoplayer::HostMovieCommand> {
+        let mut commands = Vec::new();
+        self.game_data
+            .video_manager
+            .drain_host_commands(&mut commands);
+        commands
+    }
+
+    #[cfg(feature = "hosted")]
     pub fn capture_hosted_snapshot(&self) -> RfvpResult<HostedCoreSnapshot> {
         if self.run_state != RfvpCoreRunState::Booted {
             return Err(RfvpError::InvalidData);
