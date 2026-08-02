@@ -363,6 +363,19 @@ mod tests {
             .set_trace_profile(HostedTraceProfile::Shipping)
             .expect("shipping profile disables trace capture");
     }
+
+    #[test]
+    fn recording_audio_preserves_resource_identity_without_payload_bytes() {
+        let mut audio = RecordingAudio::new(HostedLimits::default());
+        audio
+            .load_resource(AudioStreamId(3), EncodedAudioKind::Ogg, "audio/theme.ogg")
+            .expect("resource audio is accepted");
+        assert!(matches!(
+            audio.operations.as_slice(),
+            [HostedAudioOperation::LoadResource { resource_uri, .. }]
+                if resource_uri == "audio/theme.ogg"
+        ));
+    }
 }
 
 struct RecordingHost<'a, H: RfvpHost> {
