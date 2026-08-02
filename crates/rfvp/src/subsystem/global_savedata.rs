@@ -47,6 +47,33 @@ pub struct GlobalSaveDataV1 {
 }
 
 impl GlobalSaveDataV1 {
+    /// Captures only session-owned data when hosted-core is active.  The
+    /// process-global `GLOBAL` remains deliberately untouched; volatile and
+    /// non-volatile script globals live in `HostedGlobalSnapshot` instead.
+    #[cfg(feature = "hosted")]
+    pub(crate) fn capture_hosted(game_data: &GameData) -> Self {
+        let globals = game_data.capture_hosted_globals();
+        GlobalSaveDataV1 {
+            version: 1,
+            non_volatile_global_count: globals.non_volatile_count,
+            volatile_global_count: globals.volatile_count,
+            volatile_globals: Vec::new(),
+            flags: game_data.flag_manager.clone(),
+            readed_text: game_data.motion_manager.text_manager.readed_text.clone(),
+            thumb_width: game_data.save_manager.get_thumb_width(),
+            thumb_height: game_data.save_manager.get_thumb_height(),
+            current_cursor_index: game_data.get_current_cursor_index(),
+            render_flag: game_data.get_render_flag(),
+            is_first_frame: game_data.get_is_first_frame(),
+            close_immediate: game_data.get_close_immediate(),
+            system_fontface_id: game_data.fontface_manager.get_system_fontface_id(),
+            current_font_name: game_data
+                .fontface_manager
+                .get_current_font_name()
+                .to_string(),
+        }
+    }
+
     pub fn capture(game_data: &GameData) -> Self {
         let (non_volatile_global_count, _volatile_global_count) = {
             let g = GLOBAL.lock().unwrap();

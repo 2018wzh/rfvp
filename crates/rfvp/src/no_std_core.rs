@@ -18,6 +18,8 @@ use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache
 use crate::script::global::GLOBAL;
 use crate::script::parser::{Nls, Parser};
 use crate::subsystem::anzu_scene::AnzuScene;
+#[cfg(feature = "hosted")]
+use crate::subsystem::global_savedata::GlobalSaveDataV1;
 use crate::subsystem::resources::text_manager::FontEnumerator;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
@@ -138,6 +140,7 @@ pub struct HostedCoreSnapshot {
     pub time: TimeSnapshotV1,
     pub deferred_threads: ThreadWrapperSnapshotV1,
     pub runtime_state: RuntimeGameStateSnapshotV1,
+    pub global_state: GlobalSaveDataV1,
 }
 
 #[cfg(feature = "hosted")]
@@ -311,6 +314,7 @@ impl RfvpCore {
             time: self.game_data.time_ref().capture_snapshot_v1(),
             deferred_threads: self.game_data.thread_wrapper.capture_snapshot_v1(),
             runtime_state: self.game_data.capture_runtime_state_v1(),
+            global_state: GlobalSaveDataV1::capture_hosted(&self.game_data),
         })
     }
 
@@ -343,6 +347,7 @@ impl RfvpCore {
             .apply_snapshot_v1(snapshot.deferred_threads.clone());
         self.game_data
             .apply_runtime_state_v1(snapshot.runtime_state.clone());
+        snapshot.global_state.apply(&mut self.game_data);
         self.frame_index = snapshot.frame_index;
         self.last_tick_us = snapshot.last_tick_us;
         self.quit_requested = snapshot.quit_requested;
