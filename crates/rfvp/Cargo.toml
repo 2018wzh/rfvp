@@ -158,6 +158,7 @@ runtime-core-deps = [
     "serde/derive",
     "dep:serde_json",
     "dep:bincode",
+    "dep:sha2",
     "dep:twofloat",
     "dep:glob",
     "dep:atomic_refcell",
