@@ -42,6 +42,8 @@ pub struct HostedLimits {
     pub max_texture_bytes: usize,
     pub max_audio_operations: usize,
     pub max_audio_bytes: usize,
+    pub max_text_operations: usize,
+    pub max_text_bytes: usize,
 }
 
 impl Default for HostedLimits {
@@ -52,6 +54,8 @@ impl Default for HostedLimits {
             max_texture_bytes: 64 * 1024 * 1024,
             max_audio_operations: 4_096,
             max_audio_bytes: 16 * 1024 * 1024,
+            max_text_operations: 256,
+            max_text_bytes: 128 * 1024,
         }
     }
 }
@@ -158,6 +162,14 @@ pub enum HostedVideoOperation {
     },
 }
 
+/// Semantic text emitted by script printing. Text remains in the hosted
+/// session until the embedding explicitly turns it into a local-only lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedTextOperation {
+    pub slot: u8,
+    pub text: String,
+}
+
 /// The only presentation and audio result produced by one hosted step.
 ///
 /// An embedding may convert this into its own ABI payload, but must not commit
@@ -168,6 +180,7 @@ pub struct HostedStepDelta {
     pub scene: Vec<HostedSceneOperation>,
     pub audio: Vec<HostedAudioOperation>,
     pub video: Vec<HostedVideoOperation>,
+    pub text: Vec<HostedTextOperation>,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -204,13 +217,14 @@ impl HostedSession {
             || limits.max_texture_bytes == 0
             || limits.max_audio_operations == 0
             || limits.max_audio_bytes == 0
+            || limits.max_text_operations == 0
+            || limits.max_text_bytes == 0
         {
             return Err(RfvpError::InvalidArgument);
         }
-        Ok(Self {
-            core: RfvpCore::new(config),
-            limits,
-        })
+        let mut core = RfvpCore::new(config);
+        core.set_hosted_text_limits(limits.max_text_operations, limits.max_text_bytes);
+        Ok(Self { core, limits })
     }
 
     pub fn core(&self) -> &RfvpCore {
@@ -339,6 +353,15 @@ impl HostedSession {
         let mut recording = RecordingHost::new(host, self.limits);
         let tick = self.core.tick(&mut recording)?;
         recording.finish()?;
+        let text = self
+            .core
+            .take_hosted_text_events()
+            .into_iter()
+            .map(|event| HostedTextOperation {
+                slot: event.slot,
+                text: event.text,
+            })
+            .collect::<Vec<_>>();
         Ok(HostedStepDelta {
             tick,
             scene: recording.renderer.operations,
@@ -358,6 +381,7 @@ impl HostedSession {
                     stage_height: command.screen_h,
                 })
                 .collect(),
+            text,
         })
     }
 

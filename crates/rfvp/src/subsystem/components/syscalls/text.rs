@@ -608,10 +608,15 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 log::error!("text_print: content length >= 512 is not supported");
                 return Ok(Variant::Nil);
             }
+            #[cfg(feature = "hosted")]
+            if !game_data.record_hosted_text(id, s) {
+                anyhow::bail!("hosted text transaction capacity exceeded");
+            }
             game_data
                 .motion_manager
                 .text_manager
                 .set_text_content(id, s);
+            #[cfg(not(feature = "hosted"))]
             super::legacy::on_legacy_text_print(s, id);
             let _ =
                 game_data
@@ -645,6 +650,10 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 log::error!("text_print: content length >= 512 is not supported");
                 return Ok(Variant::Nil);
             }
+            #[cfg(feature = "hosted")]
+            if !game_data.record_hosted_text(id, s) {
+                anyhow::bail!("hosted text transaction capacity exceeded");
+            }
             // Const-string prints like a normal string AND marks a bitmap by its offset.
             // IMPORTANT: without uploading the updated slot buffer, the visible text stays stale
             // (typically still the cleared TextBuff), which makes the message window appear empty.
@@ -652,6 +661,7 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 .motion_manager
                 .text_manager
                 .set_text_content(id, s);
+            #[cfg(not(feature = "hosted"))]
             super::legacy::on_legacy_text_print(s, id);
             let _ =
                 game_data

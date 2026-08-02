@@ -305,6 +305,19 @@ impl RfvpCore {
         commands
     }
 
+    #[cfg(feature = "hosted")]
+    pub(crate) fn take_hosted_text_events(
+        &mut self,
+    ) -> Vec<crate::subsystem::world::HostedTextEvent> {
+        self.game_data.take_hosted_text_events()
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn set_hosted_text_limits(&mut self, max_operations: usize, max_bytes: usize) {
+        self.game_data
+            .set_hosted_text_limits(max_operations, max_bytes);
+    }
+
     /// Completes the single host-owned movie currently active in this
     /// session. The embedding must call this only after it has matched a
     /// previously emitted hosted video command; unsolicited completion is an
