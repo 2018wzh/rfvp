@@ -36,6 +36,7 @@ log = { version = "0.4.20", optional = true }
 serde = { version = "1.0.196", default-features = false, optional = true }
 serde_json = { version = "1.0.113", optional = true }
 bincode = { version = "1.3.3", optional = true }
+sha2 = { version = "0.10.9", default-features = false, optional = true }
 twofloat = { version = "0.7.0", default-features = false, optional = true }
 winit = {version = "0.30.5", features = ["rwh_05"], optional = true}
 wgpu = { version = "0.19.1", features = ["spirv"], optional = true }
@@ -106,7 +107,7 @@ default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "r
 # A standard-library embedding of the portable RFVP core.  This selects the
 # host-neutral resource/render/audio modules without enabling the upstream
 # window or GPU product hosts.
-hosted = ["no_std", "dep:bincode"]
+hosted = ["no_std", "dep:bincode", "dep:sha2"]
 
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:

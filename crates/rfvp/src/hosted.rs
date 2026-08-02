@@ -270,6 +270,13 @@ impl HostedSession {
         Ok(bytes)
     }
 
+    /// Deterministic semantic state for replay and restore verification.
+    /// Unlike [`Self::snapshot_bytes`], this excludes transient graphics cache
+    /// representation and must not be used as a persistence payload.
+    pub fn canonical_state_bytes(&self) -> RfvpResult<Vec<u8>> {
+        self.core.canonical_hosted_state_bytes()
+    }
+
     pub fn restore_bytes(&mut self, bytes: &[u8]) -> RfvpResult<()> {
         if bytes.is_empty() || bytes.len() > MAX_HOSTED_SNAPSHOT_BYTES {
             return Err(RfvpError::CapacityExceeded);

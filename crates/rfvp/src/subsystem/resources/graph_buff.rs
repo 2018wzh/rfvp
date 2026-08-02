@@ -11,6 +11,7 @@ use anyhow::{anyhow, Result};
 use core_maths::CoreFloat;
 use image::{DynamicImage, GenericImageView, ImageBuffer};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::texture::NvsgTexture;
 use super::vfs::Vfs;
@@ -82,6 +83,14 @@ pub struct GraphBuff {
 }
 
 impl GraphBuff {
+    fn content_sha256(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        if let Some(texture) = &self.texture {
+            digest.update(texture.to_rgba8().as_raw());
+        }
+        digest.finalize().into()
+    }
+
     pub fn new() -> Self {
         Self {
             texture: None,
@@ -547,13 +556,14 @@ impl GraphBuff {
 
         if !reused {
             self.texture = None;
-            let img = image::RgbaImage::from_raw(width, height, buff.to_vec()).ok_or_else(|| {
-                anyhow!(
-                    "load_from_buff: RgbaImage::from_raw failed ({}x{})",
-                    width,
-                    height
-                )
-            })?;
+            let img =
+                image::RgbaImage::from_raw(width, height, buff.to_vec()).ok_or_else(|| {
+                    anyhow!(
+                        "load_from_buff: RgbaImage::from_raw failed ({}x{})",
+                        width,
+                        height
+                    )
+                })?;
             self.texture = Some(DynamicImage::ImageRgba8(img));
         }
 
@@ -926,7 +936,53 @@ pub struct GraphBuffSnapshotV1 {
     pub rgba: Option<Vec<u8>>,
 }
 
+/// Canonical graph identity used for deterministic hosted-state comparison.
+/// Pixel buffers are represented by their digest so restore-time image-cache
+/// layout cannot affect state verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphBuffCanonicalStateV1 {
+    pub id: u16,
+    pub r_value: u8,
+    pub g_value: u8,
+    pub b_value: u8,
+    pub texture_ready: bool,
+    pub texture_path: String,
+    pub offset_x: u16,
+    pub offset_y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub display_width: u16,
+    pub display_height: u16,
+    pub u: u16,
+    pub v: u16,
+    pub generation: u64,
+    pub load_kind: GraphBuffLoadKind,
+    pub rgba_sha256: [u8; 32],
+}
+
 impl GraphBuff {
+    pub fn capture_canonical_state_with_id(&self, id: u16) -> GraphBuffCanonicalStateV1 {
+        GraphBuffCanonicalStateV1 {
+            id,
+            r_value: self.r_value,
+            g_value: self.g_value,
+            b_value: self.b_value,
+            texture_ready: self.texture_ready,
+            texture_path: self.texture_path.clone(),
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            width: self.width,
+            height: self.height,
+            display_width: self.get_display_width(),
+            display_height: self.get_display_height(),
+            u: self.u,
+            v: self.v,
+            generation: self.generation,
+            load_kind: self.load_kind,
+            rgba_sha256: self.content_sha256(),
+        }
+    }
+
     pub fn capture_snapshot_with_id(&self, id: u16) -> GraphBuffSnapshotV1 {
         // Skip empty graphs.
         if !self.texture_ready && self.texture.is_none() && self.texture_path.is_empty() {
@@ -1078,7 +1134,6 @@ mod hidpi_text_region_tests {
         assert_eq!(region.tex_w, 700.0);
         assert_eq!(region.tex_h, 140.0);
     }
-
 
     #[test]
     fn text_rect_keeps_destination_origin_when_source_starts_inside_content() {

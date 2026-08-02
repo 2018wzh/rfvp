@@ -4,6 +4,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 #[cfg(feature = "hosted")]
+use bincode::Options;
+#[cfg(feature = "hosted")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "hosted")]
 use std::io::Read;
@@ -25,11 +27,12 @@ use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
 #[cfg(feature = "hosted")]
 use crate::subsystem::resources::{
-    input_manager::InputManagerSnapshotV1, thread_wrapper::ThreadWrapperSnapshotV1,
+    input_manager::InputManagerSnapshotV1, motion_manager::MotionManagerCanonicalStateV1,
+    thread_manager::ThreadManagerSnapshotV1, thread_wrapper::ThreadWrapperSnapshotV1,
     time::TimeSnapshotV1, timer_manager::TimerManagerSnapshotV1,
 };
 #[cfg(feature = "hosted")]
-use crate::subsystem::save_state::SaveStateSnapshotV1;
+use crate::subsystem::save_state::{AudioSnapshotV1, SaveStateSnapshotV1};
 use crate::subsystem::world::GameData;
 #[cfg(feature = "hosted")]
 use crate::subsystem::world::RuntimeGameStateSnapshotV1;
@@ -144,7 +147,30 @@ pub struct HostedCoreSnapshot {
 }
 
 #[cfg(feature = "hosted")]
-pub const HOSTED_CORE_SNAPSHOT_VERSION: u16 = 1;
+pub const HOSTED_CORE_SNAPSHOT_VERSION: u16 = 2;
+
+/// Stable semantic state used by an embedding for verification.  This is not
+/// a persistence format: it deliberately represents graphics pixels by
+/// content digest so image allocation and decode-cache layout cannot perturb
+/// the state identity after a restore.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Serialize)]
+struct HostedCanonicalStateV1 {
+    version: u16,
+    frame_index: u64,
+    last_tick_us: Option<u64>,
+    quit_requested: bool,
+    globals: crate::script::global::HostedGlobalSnapshot,
+    input: InputManagerSnapshotV1,
+    timers: TimerManagerSnapshotV1,
+    time: TimeSnapshotV1,
+    deferred_threads: ThreadWrapperSnapshotV1,
+    runtime_state: RuntimeGameStateSnapshotV1,
+    global_state: GlobalSaveDataV1,
+    motion: MotionManagerCanonicalStateV1,
+    audio: AudioSnapshotV1,
+    vm: ThreadManagerSnapshotV1,
+}
 
 pub struct RfvpCore {
     config: RfvpCoreConfig,
@@ -354,6 +380,41 @@ impl RfvpCore {
         self.last_error = None;
         self.last_error_detail = None;
         Ok(())
+    }
+
+    /// Produces a deterministic, host-neutral state representation for
+    /// replay and restore verification. Persistence must use
+    /// [`Self::capture_hosted_snapshot`] instead.
+    #[cfg(feature = "hosted")]
+    pub fn canonical_hosted_state_bytes(&self) -> RfvpResult<Vec<u8>> {
+        if self.run_state != RfvpCoreRunState::Booted {
+            return Err(RfvpError::InvalidData);
+        }
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        let state = HostedCanonicalStateV1 {
+            version: 1,
+            frame_index: self.frame_index,
+            last_tick_us: self.last_tick_us,
+            quit_requested: self.quit_requested,
+            globals: self.game_data.capture_hosted_globals(),
+            input: self.game_data.inputs_manager.capture_snapshot_v1(),
+            timers: self.game_data.timer_manager.capture_snapshot_v1(),
+            time: self.game_data.time_ref().capture_snapshot_v1(),
+            deferred_threads: self.game_data.thread_wrapper.capture_snapshot_v1(),
+            runtime_state: self.game_data.capture_runtime_state_v1(),
+            global_state: GlobalSaveDataV1::capture_hosted(&self.game_data),
+            motion: self.game_data.motion_manager.capture_canonical_state_v1(),
+            audio: AudioSnapshotV1 {
+                bgm: self.game_data.bgm_player_ref().capture_snapshot_v1(),
+                se: self.game_data.se_player_ref().capture_snapshot_v1(),
+            },
+            vm: vm_runner.thread_manager().capture_snapshot_v1(),
+        };
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .serialize(&state)
+            .map_err(|_| RfvpError::InvalidData)
     }
 
     pub fn push_event(&mut self, event: RfvpEvent) -> RfvpResult<()> {
