@@ -30,6 +30,8 @@ use crate::subsystem::resources::{
 use crate::subsystem::save_state::SaveStateSnapshotV1;
 use crate::subsystem::world::GameData;
 #[cfg(feature = "hosted")]
+use crate::subsystem::world::RuntimeGameStateSnapshotV1;
+#[cfg(feature = "hosted")]
 use crate::vm_runner::HostedVmTraceRecord;
 use crate::vm_runner::VmRunner;
 #[cfg(feature = "old_school")]
@@ -135,6 +137,7 @@ pub struct HostedCoreSnapshot {
     pub timers: TimerManagerSnapshotV1,
     pub time: TimeSnapshotV1,
     pub deferred_threads: ThreadWrapperSnapshotV1,
+    pub runtime_state: RuntimeGameStateSnapshotV1,
 }
 
 #[cfg(feature = "hosted")]
@@ -307,6 +310,7 @@ impl RfvpCore {
             timers: self.game_data.timer_manager.capture_snapshot_v1(),
             time: self.game_data.time_ref().capture_snapshot_v1(),
             deferred_threads: self.game_data.thread_wrapper.capture_snapshot_v1(),
+            runtime_state: self.game_data.capture_runtime_state_v1(),
         })
     }
 
@@ -337,6 +341,8 @@ impl RfvpCore {
         self.game_data
             .thread_wrapper
             .apply_snapshot_v1(snapshot.deferred_threads.clone());
+        self.game_data
+            .apply_runtime_state_v1(snapshot.runtime_state.clone());
         self.frame_index = snapshot.frame_index;
         self.last_tick_us = snapshot.last_tick_us;
         self.quit_requested = snapshot.quit_requested;

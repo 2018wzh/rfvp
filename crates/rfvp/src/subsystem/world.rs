@@ -181,7 +181,55 @@ pub struct GameData {
     pub(crate) debug_vm: crate::debug_ui::vm_snapshot::VmSnapshot,
 }
 
+/// Runtime control state not owned by the VM, motion, audio or globals
+/// snapshots.  Hosted checkpointing must retain it to preserve shutdown,
+/// thread-routing and next-frame presentation behavior.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeGameStateSnapshotV1 {
+    root_prim: Option<i16>,
+    can_fullscreen: bool,
+    pending_render_flag: Option<i32>,
+    lock_scripter: bool,
+    close_pending: bool,
+    last_current_thread: u32,
+    current_thread: u32,
+    main_thread_exited: bool,
+    game_should_exit: bool,
+    halt: bool,
+}
+
 impl GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) fn capture_runtime_state_v1(&self) -> RuntimeGameStateSnapshotV1 {
+        RuntimeGameStateSnapshotV1 {
+            root_prim: self.root_prim,
+            can_fullscreen: self.can_fullscreen,
+            pending_render_flag: self.pending_render_flag,
+            lock_scripter: self.lock_scripter,
+            close_pending: self.close_pending,
+            last_current_thread: self.last_current_thread,
+            current_thread: self.current_thread,
+            main_thread_exited: self.main_thread_exited,
+            game_should_exit: self.game_should_exit,
+            halt: self.halt,
+        }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn apply_runtime_state_v1(&mut self, snapshot: RuntimeGameStateSnapshotV1) {
+        self.root_prim = snapshot.root_prim;
+        self.can_fullscreen = snapshot.can_fullscreen;
+        self.pending_render_flag = snapshot.pending_render_flag;
+        self.lock_scripter = snapshot.lock_scripter;
+        self.close_pending = snapshot.close_pending;
+        self.last_current_thread = snapshot.last_current_thread;
+        self.current_thread = snapshot.current_thread;
+        self.main_thread_exited = snapshot.main_thread_exited;
+        self.game_should_exit = snapshot.game_should_exit;
+        self.halt = snapshot.halt;
+    }
+
     /// Initialize a `GameData` at `dst` with the same values as `GameData::default()`,
     /// but without creating a large temporary on the stack.
     ///
