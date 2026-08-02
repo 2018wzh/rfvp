@@ -129,11 +129,17 @@ fn bincode_opts() -> impl bincode::Options {
         .reject_trailing_bytes()
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn global_savedata_path() -> PathBuf {
     app_base_path()
         .get_path()
         .join("save")
         .join("rfvp_global.bin")
+}
+
+#[cfg(feature = "hosted")]
+pub fn global_savedata_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("save").join("rfvp_global.bin")
 }
 
 #[cfg(feature = "no_std")]

@@ -1,10 +1,10 @@
-#![cfg_attr(feature = "no_std", no_std)]
+#![cfg_attr(all(feature = "no_std", not(feature = "hosted")), no_std)]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 extern crate alloc;
 #[cfg(feature = "no_std")]
 extern crate self as image;
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "hosted")))]
 extern crate self as std;
 #[cfg(feature = "no_std")]
 pub use alloc::{format, vec};
@@ -856,6 +856,9 @@ pub mod string {
 compile_error!("feature `no_std` is an independent core-library build and must not be combined with runtime/backend features");
 
 pub mod host_api;
+
+#[cfg(feature = "hosted")]
+pub mod hosted;
 
 #[cfg(feature = "no_std")]
 pub mod no_std_core;

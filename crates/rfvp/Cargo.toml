@@ -103,6 +103,11 @@ anzu-hal = { path = "../anzu-hal", optional = true }
 # Keep native movie support enabled by default for backward compatibility.
 default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging"]
 
+# A standard-library embedding of the portable RFVP core.  This selects the
+# host-neutral resource/render/audio modules without enabling the upstream
+# window or GPU product hosts.
+hosted = ["no_std"]
+
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:
 # cargo check -p rfvp --no-default-features --features no_std --lib
