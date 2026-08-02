@@ -240,6 +240,12 @@ impl HostedSession {
         self.core.quit_requested()
     }
 
+    /// Returns the terminal state for the hosted lifecycle, including normal
+    /// script completion rather than only an explicit host quit event.
+    pub fn is_terminal(&self) -> bool {
+        self.core.hosted_terminal()
+    }
+
     /// Acknowledge completion of the one outstanding hosted video operation.
     /// The embedding owns request-token matching; this method deliberately
     /// carries no product-specific identifier.

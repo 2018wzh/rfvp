@@ -250,6 +250,15 @@ impl RfvpCore {
         self.quit_requested
     }
 
+    /// A hosted session is terminal when either the host requested shutdown or
+    /// the script's main execution path reached its terminal state.
+    #[cfg(feature = "hosted")]
+    pub fn hosted_terminal(&self) -> bool {
+        self.quit_requested
+            || self.game_data.get_main_thread_exited()
+            || self.game_data.get_game_should_exit()
+    }
+
     pub fn run_state(&self) -> RfvpCoreRunState {
         self.run_state
     }
