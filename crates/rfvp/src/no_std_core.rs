@@ -228,6 +228,22 @@ impl RfvpCore {
         commands
     }
 
+    /// Completes the single host-owned movie currently active in this
+    /// session. The embedding must call this only after it has matched a
+    /// previously emitted hosted video command; unsolicited completion is an
+    /// embedding protocol error and must be rejected before this boundary.
+    #[cfg(feature = "hosted")]
+    pub fn complete_hosted_video(&mut self) -> RfvpResult<()> {
+        if !self.game_data.video_manager.is_playing() {
+            return Err(RfvpError::InvalidData);
+        }
+        self.game_data
+            .video_manager
+            .stop(&mut self.game_data.motion_manager);
+        self.game_data.set_halt(false);
+        Ok(())
+    }
+
     #[cfg(feature = "hosted")]
     pub fn capture_hosted_snapshot(&self) -> RfvpResult<HostedCoreSnapshot> {
         if self.run_state != RfvpCoreRunState::Booted {

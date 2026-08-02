@@ -233,6 +233,17 @@ impl HostedSession {
         self.core.hosted_trace()
     }
 
+    pub fn quit_requested(&self) -> bool {
+        self.core.quit_requested()
+    }
+
+    /// Acknowledge completion of the one outstanding hosted video operation.
+    /// The embedding owns request-token matching; this method deliberately
+    /// carries no product-specific identifier.
+    pub fn complete_video(&mut self) -> RfvpResult<()> {
+        self.core.complete_hosted_video()
+    }
+
     pub fn snapshot(&self) -> RfvpResult<HostedSnapshot> {
         self.core.capture_hosted_snapshot()
     }
