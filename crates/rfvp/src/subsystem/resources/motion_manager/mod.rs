@@ -1235,6 +1235,17 @@ pub struct MotionManagerCanonicalStateV1 {
 }
 
 impl MotionManager {
+    fn capture_canonical_text_state(&self) -> TextManagerSnapshotV1 {
+        let mut text = self.text_manager.capture_snapshot_v1();
+        // TextItem pixel surfaces are a renderer cache. Restore intentionally
+        // marks them dirty so the host can rebuild at its current scale; that
+        // cache bit must not perturb semantic state identity.
+        for item in &mut text.items {
+            item.dirty = true;
+        }
+        text
+    }
+
     pub fn capture_canonical_state_v1(&self) -> MotionManagerCanonicalStateV1 {
         let textures = self
             .textures
@@ -1259,7 +1270,7 @@ impl MotionManager {
             color_manager: self.color_manager.clone(),
             prim_manager: self.prim_manager.capture_snapshot_v1(),
             textures,
-            text_manager: self.text_manager.capture_snapshot_v1(),
+            text_manager: self.capture_canonical_text_state(),
             parts_manager: self.parts_manager.borrow().capture_snapshot_v1(),
             gaiji_manager: self.gaiji_manager.capture_snapshot_v1(),
             dissolve1,
