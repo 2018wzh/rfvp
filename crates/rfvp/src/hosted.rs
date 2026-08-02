@@ -13,13 +13,15 @@ use crate::host_api::{
     RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer, RfvpResult, TextureDesc, TextureId,
     TextureRect,
 };
-pub use crate::no_std_core::{
-    RfvpBootConfig as HostedBootConfig, RfvpCoreConfig as HostedConfig,
-    RfvpCoreRunState as HostedRunState, RfvpLoadedGame as HostedLoadedGame,
-    RfvpResourceEntry as HostedResourceEntry, RfvpTickResult as HostedTickResult, RfvpCore,
-};
 #[cfg(feature = "hosted")]
 pub use crate::no_std_core::{HostedCoreSnapshot as HostedSnapshot, HOSTED_CORE_SNAPSHOT_VERSION};
+pub use crate::no_std_core::{
+    RfvpBootConfig as HostedBootConfig, RfvpCore, RfvpCoreConfig as HostedConfig,
+    RfvpCoreRunState as HostedRunState, RfvpLoadedGame as HostedLoadedGame,
+    RfvpResourceEntry as HostedResourceEntry, RfvpTickResult as HostedTickResult,
+};
+#[cfg(feature = "hosted")]
+pub use crate::vm_runner::HostedVmTraceRecord;
 
 /// Increment only for a deliberately incompatible hosted-core wire contract.
 pub const HOSTED_ABI_VERSION: u16 = 1;
@@ -145,6 +147,25 @@ pub struct HostedStepDelta {
     pub audio: Vec<HostedAudioOperation>,
 }
 
+/// The production profile leaves instruction evidence disabled. Evidence is
+/// opt-in and bounded to a fixed crash ring; it never formats or serializes an
+/// opcode on the dispatch path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostedTraceProfile {
+    #[default]
+    Shipping,
+    Evidence {
+        crash_trace_capacity: usize,
+    },
+}
+
+/// Optional embedding hook invoked only after a complete hosted delta has
+/// been captured. Observers cannot mutate RFVP state or make a failed step
+/// appear successful.
+pub trait HostedStepObserver {
+    fn on_step(&mut self, delta: &HostedStepDelta);
+}
+
 /// A session owns its pending input, core state and capture limits.  It is not
 /// `Sync` by construction: concurrent games must use separate sessions and
 /// separate hosts rather than a process-wide lock.
@@ -175,6 +196,21 @@ impl HostedSession {
 
     pub fn limits(&self) -> HostedLimits {
         self.limits
+    }
+
+    pub fn set_trace_profile(&mut self, profile: HostedTraceProfile) -> RfvpResult<()> {
+        let capacity = match profile {
+            HostedTraceProfile::Shipping => 0,
+            HostedTraceProfile::Evidence {
+                crash_trace_capacity,
+            } if crash_trace_capacity > 0 => crash_trace_capacity,
+            HostedTraceProfile::Evidence { .. } => return Err(RfvpError::InvalidArgument),
+        };
+        self.core.set_hosted_trace_capacity(capacity)
+    }
+
+    pub fn crash_trace(&self) -> RfvpResult<Vec<HostedVmTraceRecord>> {
+        self.core.hosted_trace()
     }
 
     pub fn snapshot(&self) -> RfvpResult<HostedSnapshot> {
@@ -229,6 +265,48 @@ impl HostedSession {
             scene: recording.renderer.operations,
             audio: recording.audio.operations,
         })
+    }
+
+    /// Runs a step and publishes its complete delta to an observer. A failed
+    /// core step never invokes the observer, preserving fail-stop commit
+    /// semantics for recorders and evidence collectors.
+    pub fn step_observed<H: RfvpHost, O: HostedStepObserver>(
+        &mut self,
+        host: &mut H,
+        input: HostedStepInput,
+        observer: &mut O,
+    ) -> RfvpResult<HostedStepDelta>
+    where
+        <H::FileSystem as RfvpFileSystem>::File: 'static,
+    {
+        let delta = self.step(host, input)?;
+        observer.on_step(&delta);
+        Ok(delta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evidence_profile_requires_a_fixed_positive_ring_capacity() {
+        let mut session = HostedSession::new(HostedConfig::default(), HostedLimits::default())
+            .expect("default hosted session is valid");
+        assert_eq!(
+            session.set_trace_profile(HostedTraceProfile::Evidence {
+                crash_trace_capacity: 0,
+            }),
+            Err(RfvpError::InvalidArgument)
+        );
+        session
+            .set_trace_profile(HostedTraceProfile::Evidence {
+                crash_trace_capacity: 32,
+            })
+            .expect("bounded evidence profile is valid");
+        session
+            .set_trace_profile(HostedTraceProfile::Shipping)
+            .expect("shipping profile disables trace capture");
     }
 }
 
@@ -338,11 +416,13 @@ impl RfvpRenderer for RecordingRenderer {
     ) -> RfvpResult<()> {
         self.finish()?;
         validate_texture_desc(desc)?;
-        let pixels = pixels.map(|pixels| {
-            validate_texture_pixels(desc, pixels.len())?;
-            self.reserve_texture_bytes(pixels.len())?;
-            Ok::<Vec<u8>, RfvpError>(pixels.to_vec())
-        }).transpose()?;
+        let pixels = pixels
+            .map(|pixels| {
+                validate_texture_pixels(desc, pixels.len())?;
+                self.reserve_texture_bytes(pixels.len())?;
+                Ok::<Vec<u8>, RfvpError>(pixels.to_vec())
+            })
+            .transpose()?;
         if let Some((_, previous)) = self.textures.iter().find(|(known, _)| *known == id) {
             if *previous != desc {
                 return Err(RfvpError::InvalidData);
@@ -361,10 +441,19 @@ impl RfvpRenderer for RecordingRenderer {
             }));
         }
         self.textures.push((id, desc));
-        self.push(HostedSceneOperation::CreateTexture(HostedTextureData { id, desc, pixels }))
+        self.push(HostedSceneOperation::CreateTexture(HostedTextureData {
+            id,
+            desc,
+            pixels,
+        }))
     }
 
-    fn update_texture(&mut self, id: TextureId, rect: TextureRect, pixels: &[u8]) -> RfvpResult<()> {
+    fn update_texture(
+        &mut self,
+        id: TextureId,
+        rect: TextureRect,
+        pixels: &[u8],
+    ) -> RfvpResult<()> {
         self.finish()?;
         let Some((_, desc)) = self.textures.iter().find(|(known, _)| *known == id) else {
             return Err(RfvpError::NotFound);
@@ -372,8 +461,16 @@ impl RfvpRenderer for RecordingRenderer {
         let desc = *desc;
         if rect.width == 0
             || rect.height == 0
-            || rect.x.checked_add(rect.width).ok_or(RfvpError::CapacityExceeded)? > desc.width
-            || rect.y.checked_add(rect.height).ok_or(RfvpError::CapacityExceeded)? > desc.height
+            || rect
+                .x
+                .checked_add(rect.width)
+                .ok_or(RfvpError::CapacityExceeded)?
+                > desc.width
+            || rect
+                .y
+                .checked_add(rect.height)
+                .ok_or(RfvpError::CapacityExceeded)?
+                > desc.height
         {
             return Err(RfvpError::InvalidArgument);
         }
@@ -406,7 +503,11 @@ impl RfvpRenderer for RecordingRenderer {
         if width == 0 || height == 0 {
             return Err(RfvpError::InvalidArgument);
         }
-        self.push(HostedSceneOperation::BeginFrame { width, height, clear })
+        self.push(HostedSceneOperation::BeginFrame {
+            width,
+            height,
+            clear,
+        })
     }
 
     fn draw_sprite(&mut self, command: &DrawSpriteCommand) -> RfvpResult<()> {
@@ -516,9 +617,18 @@ impl RecordingAudio {
 }
 
 impl RfvpAudio for RecordingAudio {
-    fn load_encoded(&mut self, id: AudioStreamId, kind: EncodedAudioKind, bytes: &[u8]) -> RfvpResult<()> {
+    fn load_encoded(
+        &mut self,
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        bytes: &[u8],
+    ) -> RfvpResult<()> {
         self.reserve_audio_bytes(bytes.len())?;
-        self.push(HostedAudioOperation::LoadEncoded { id, kind, bytes: bytes.to_vec() })
+        self.push(HostedAudioOperation::LoadEncoded {
+            id,
+            kind,
+            bytes: bytes.to_vec(),
+        })
     }
 
     fn create_stream(&mut self, id: AudioStreamId, desc: AudioStreamDesc) -> RfvpResult<()> {
@@ -526,19 +636,35 @@ impl RfvpAudio for RecordingAudio {
     }
 
     fn submit_i16(&mut self, id: AudioStreamId, samples: &[i16]) -> RfvpResult<()> {
-        let bytes = samples.len().checked_mul(core::mem::size_of::<i16>()).ok_or(RfvpError::CapacityExceeded)?;
+        let bytes = samples
+            .len()
+            .checked_mul(core::mem::size_of::<i16>())
+            .ok_or(RfvpError::CapacityExceeded)?;
         self.reserve_audio_bytes(bytes)?;
-        self.push(HostedAudioOperation::SubmitI16 { id, samples: samples.to_vec() })
+        self.push(HostedAudioOperation::SubmitI16 {
+            id,
+            samples: samples.to_vec(),
+        })
     }
 
     fn submit_f32(&mut self, id: AudioStreamId, samples: &[f32]) -> RfvpResult<()> {
-        let bytes = samples.len().checked_mul(core::mem::size_of::<f32>()).ok_or(RfvpError::CapacityExceeded)?;
+        let bytes = samples
+            .len()
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or(RfvpError::CapacityExceeded)?;
         self.reserve_audio_bytes(bytes)?;
-        self.push(HostedAudioOperation::SubmitF32 { id, samples: samples.to_vec() })
+        self.push(HostedAudioOperation::SubmitF32 {
+            id,
+            samples: samples.to_vec(),
+        })
     }
 
     fn play(&mut self, id: AudioStreamId, params: AudioParams, fade_in_ms: u32) -> RfvpResult<()> {
-        self.push(HostedAudioOperation::Play { id, params, fade_in_ms })
+        self.push(HostedAudioOperation::Play {
+            id,
+            params,
+            fade_in_ms,
+        })
     }
 
     fn stop(&mut self, id: AudioStreamId, fade_ms: u32) -> RfvpResult<()> {

@@ -1,6 +1,6 @@
+use alloc::boxed::Box;
 #[cfg(not(feature = "old_school"))]
 use alloc::format;
-use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -17,10 +17,12 @@ use crate::subsystem::anzu_scene::AnzuScene;
 use crate::subsystem::resources::text_manager::FontEnumerator;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
-use crate::subsystem::world::GameData;
-use crate::vm_runner::VmRunner;
 #[cfg(feature = "hosted")]
 use crate::subsystem::save_state::SaveStateSnapshotV1;
+use crate::subsystem::world::GameData;
+#[cfg(feature = "hosted")]
+use crate::vm_runner::HostedVmTraceRecord;
+use crate::vm_runner::VmRunner;
 #[cfg(feature = "old_school")]
 use core_maths::CoreFloat;
 
@@ -136,6 +138,8 @@ pub struct RfvpCore {
     parser: Option<Parser>,
     game_data: GameData,
     vm_runner: Option<VmRunner>,
+    #[cfg(feature = "hosted")]
+    hosted_trace_capacity: usize,
     render_cache: HostPrimRenderCache,
     hit_proxies: HitProxyTable,
     last_error: Option<RfvpError>,
@@ -155,6 +159,8 @@ impl RfvpCore {
             parser: None,
             game_data: GameData::default(),
             vm_runner: None,
+            #[cfg(feature = "hosted")]
+            hosted_trace_capacity: 0,
             render_cache: HostPrimRenderCache::new(),
             hit_proxies: HitProxyTable::default(),
             last_error: None,
@@ -188,6 +194,25 @@ impl RfvpCore {
 
     pub fn last_error_detail(&self) -> Option<&str> {
         self.last_error_detail.as_deref()
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn set_hosted_trace_capacity(&mut self, capacity: usize) -> RfvpResult<()> {
+        if let Some(vm_runner) = self.vm_runner.as_mut() {
+            vm_runner
+                .set_hosted_trace_capacity(capacity)
+                .map_err(|_| RfvpError::CapacityExceeded)?;
+        } else if capacity > 65_536 {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        self.hosted_trace_capacity = capacity;
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn hosted_trace(&self) -> RfvpResult<Vec<HostedVmTraceRecord>> {
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        Ok(vm_runner.hosted_trace())
     }
 
     #[cfg(feature = "hosted")]
@@ -367,6 +392,10 @@ impl RfvpCore {
 
         let mut vm_runner =
             VmRunner::new(crate::subsystem::resources::thread_manager::ThreadManager::new());
+        #[cfg(feature = "hosted")]
+        vm_runner
+            .set_hosted_trace_capacity(self.hosted_trace_capacity)
+            .map_err(|_| RfvpError::CapacityExceeded)?;
         vm_runner.start_main(parser.get_entry_point());
         host.log(
             RfvpLogLevel::Info,
