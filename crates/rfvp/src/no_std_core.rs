@@ -517,6 +517,15 @@ impl RfvpCore {
         self.pending_events.clear();
     }
 
+    /// Drops only the transient renderer upload generations retained by the
+    /// core. A hosted embedding owns the actual backend texture lifetime, so
+    /// boot and restore boundaries must force the next frame to republish each
+    /// live graph instead of trusting a cache from a previous host epoch.
+    #[cfg(feature = "hosted")]
+    pub fn invalidate_host_render_cache(&mut self) {
+        self.render_cache = HostPrimRenderCache::new();
+    }
+
     pub fn boot<H: RfvpHost>(&mut self, host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<()>
     where
         <<H as RfvpHost>::FileSystem as RfvpFileSystem>::File: 'static,

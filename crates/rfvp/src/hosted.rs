@@ -290,7 +290,9 @@ impl HostedSession {
     }
 
     pub fn restore(&mut self, snapshot: &HostedSnapshot) -> RfvpResult<()> {
-        self.core.restore_hosted_snapshot(snapshot)
+        self.core.restore_hosted_snapshot(snapshot)?;
+        self.core.invalidate_host_render_cache();
+        Ok(())
     }
 
     /// Stable opaque persistence form for a hosted checkpoint.  Embedders may
@@ -343,6 +345,7 @@ impl HostedSession {
         if !recording.renderer.operations.is_empty() || !recording.audio.operations.is_empty() {
             return Err(RfvpError::InvalidData);
         }
+        self.core.invalidate_host_render_cache();
         Ok(())
     }
 
