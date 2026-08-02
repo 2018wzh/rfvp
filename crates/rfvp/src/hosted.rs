@@ -69,6 +69,7 @@ pub struct HostedTextureData {
 pub struct HostedTextureUpdate {
     pub id: TextureId,
     pub rect: TextureRect,
+    pub format: PixelFormat,
     pub pixels: Vec<u8>,
 }
 
@@ -355,6 +356,7 @@ impl RfvpRenderer for RecordingRenderer {
                     width: desc.width,
                     height: desc.height,
                 },
+                format: desc.format,
                 pixels,
             }));
         }
@@ -367,6 +369,7 @@ impl RfvpRenderer for RecordingRenderer {
         let Some((_, desc)) = self.textures.iter().find(|(known, _)| *known == id) else {
             return Err(RfvpError::NotFound);
         };
+        let desc = *desc;
         if rect.width == 0
             || rect.height == 0
             || rect.x.checked_add(rect.width).ok_or(RfvpError::CapacityExceeded)? > desc.width
@@ -374,11 +377,12 @@ impl RfvpRenderer for RecordingRenderer {
         {
             return Err(RfvpError::InvalidArgument);
         }
-        validate_texture_region(*desc, rect, pixels.len())?;
+        validate_texture_region(desc, rect, pixels.len())?;
         self.reserve_texture_bytes(pixels.len())?;
         self.push(HostedSceneOperation::UpdateTexture(HostedTextureUpdate {
             id,
             rect,
+            format: desc.format,
             pixels: pixels.to_vec(),
         }))
     }
