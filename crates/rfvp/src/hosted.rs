@@ -244,6 +244,13 @@ impl HostedSession {
         self.core.complete_hosted_video()
     }
 
+    /// Resolve and read a game resource through the boot-bound RFVP VFS.
+    /// Embeddings must still apply their own policy and response budgets
+    /// before invoking it and before passing its result to a backend.
+    pub fn read_resource(&mut self, resource_uri: &str, max_bytes: usize) -> RfvpResult<Vec<u8>> {
+        self.core.read_hosted_resource(resource_uri, max_bytes)
+    }
+
     pub fn snapshot(&self) -> RfvpResult<HostedSnapshot> {
         self.core.capture_hosted_snapshot()
     }
