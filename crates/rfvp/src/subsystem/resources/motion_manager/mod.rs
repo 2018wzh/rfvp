@@ -1286,11 +1286,6 @@ impl MotionManager {
     pub fn capture_snapshot_v1(&self) -> MotionManagerSnapshotV1 {
         let mut textures: Vec<GraphBuffSnapshotV1> = Vec::new();
         for (id, gb) in self.textures.iter().enumerate() {
-            // Text surfaces are rebuilt from TextManager state after load. Omitting the reserved
-            // text GraphBuff range avoids embedding large HiDPI RGBA surfaces in save states.
-            if (4064..=4095).contains(&id) {
-                continue;
-            }
             if gb.texture_ready || gb.texture.is_some() || !gb.texture_path.is_empty() {
                 textures.push(gb.capture_snapshot_with_id(id as u16));
             }

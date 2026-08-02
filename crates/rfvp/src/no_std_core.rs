@@ -147,7 +147,7 @@ pub struct HostedCoreSnapshot {
 }
 
 #[cfg(feature = "hosted")]
-pub const HOSTED_CORE_SNAPSHOT_VERSION: u16 = 2;
+pub const HOSTED_CORE_SNAPSHOT_VERSION: u16 = 3;
 
 /// Stable semantic state used by an embedding for verification.  This is not
 /// a persistence format: it deliberately represents graphics pixels by
