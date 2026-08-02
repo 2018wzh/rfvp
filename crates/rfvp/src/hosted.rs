@@ -100,6 +100,11 @@ pub enum HostedSceneOperation {
 /// copied only when the RFVP core actually emits a command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostedAudioOperation {
+    LoadResource {
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        resource_uri: String,
+    },
     LoadEncoded {
         id: AudioStreamId,
         kind: EncodedAudioKind,
@@ -667,6 +672,22 @@ impl RecordingAudio {
 }
 
 impl RfvpAudio for RecordingAudio {
+    fn load_resource(
+        &mut self,
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        resource_uri: &str,
+    ) -> RfvpResult<()> {
+        if resource_uri.is_empty() {
+            return Err(RfvpError::InvalidArgument);
+        }
+        self.push(HostedAudioOperation::LoadResource {
+            id,
+            kind,
+            resource_uri: resource_uri.into(),
+        })
+    }
+
     fn load_encoded(
         &mut self,
         id: AudioStreamId,

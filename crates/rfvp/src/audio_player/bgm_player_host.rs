@@ -68,6 +68,7 @@ impl BgmPlayer {
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: EncodedAudioKind::Unknown,
+            resource_uri: None,
             bytes: bgm,
         });
         self.loaded[slot] = true;
@@ -82,6 +83,7 @@ impl BgmPlayer {
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: encoded_kind_from_path(&name),
+            resource_uri: Some(name.clone()),
             bytes,
         });
         self.loaded[slot] = true;

@@ -1,6 +1,8 @@
 use super::error::RfvpResult;
 use alloc::vec::Vec;
 
+use super::RfvpError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioStreamId(pub u32);
 
@@ -76,6 +78,15 @@ impl Default for AudioParams {
 }
 
 pub trait RfvpAudio {
+    fn load_resource(
+        &mut self,
+        _id: AudioStreamId,
+        _kind: EncodedAudioKind,
+        _resource_uri: &str,
+    ) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
     fn load_encoded(
         &mut self,
         id: AudioStreamId,

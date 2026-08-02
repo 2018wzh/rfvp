@@ -21,6 +21,10 @@ pub enum AudioCommand {
     LoadEncoded {
         id: AudioStreamId,
         kind: EncodedAudioKind,
+        /// Present only when a syscall identified the source VFS entry.  The
+        /// hosted adapter uses this identity instead of exporting decoded or
+        /// encoded commercial bytes across its ABI boundary.
+        resource_uri: Option<String>,
         bytes: Vec<u8>,
     },
     CreateStream {

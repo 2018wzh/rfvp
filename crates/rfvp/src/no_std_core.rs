@@ -539,8 +539,17 @@ impl RfvpCore {
         self.game_data.audio_manager().drain_commands(&mut commands);
         for command in commands {
             match command {
-                crate::rfvp_audio::AudioCommand::LoadEncoded { id, kind, bytes } => {
-                    host.audio().load_encoded(id, kind, &bytes)?;
+                crate::rfvp_audio::AudioCommand::LoadEncoded {
+                    id,
+                    kind,
+                    resource_uri,
+                    bytes,
+                } => {
+                    if let Some(resource_uri) = resource_uri {
+                        host.audio().load_resource(id, kind, &resource_uri)?;
+                    } else {
+                        host.audio().load_encoded(id, kind, &bytes)?;
+                    }
                 }
                 crate::rfvp_audio::AudioCommand::CreateStream { id, desc } => {
                     host.audio().create_stream(id, desc)?;

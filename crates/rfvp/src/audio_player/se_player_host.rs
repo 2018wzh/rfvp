@@ -68,6 +68,7 @@ impl SePlayer {
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: crate::host_api::EncodedAudioKind::Unknown,
+            resource_uri: None,
             bytes: se,
         });
         self.loaded[slot] = true;
@@ -80,6 +81,7 @@ impl SePlayer {
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: encoded_kind_from_path(&name),
+            resource_uri: Some(name.clone()),
             bytes: se,
         });
         self.loaded[slot] = true;
