@@ -59,6 +59,81 @@ const MISSING_OLD_SCHOOL_CONFIG_MESSAGE: &str =
 const INVALID_OLD_SCHOOL_CONFIG_MESSAGE: &str =
     "Required old-school config file rfvp.toml is invalid: expected exactly one top-level float field, scale.";
 
+fn hosted_keycode(
+    key: crate::host_api::KeyCode,
+) -> Option<crate::subsystem::resources::input_manager::KeyCode> {
+    use crate::host_api::KeyCode as HostKeyCode;
+    use crate::subsystem::resources::input_manager::KeyCode as InputKeyCode;
+
+    Some(match key {
+        HostKeyCode::Escape => InputKeyCode::Esc,
+        HostKeyCode::Return => InputKeyCode::Enter,
+        HostKeyCode::Space => InputKeyCode::Space,
+        HostKeyCode::Tab => InputKeyCode::Tab,
+        HostKeyCode::Left => InputKeyCode::LeftArrow,
+        HostKeyCode::Right => InputKeyCode::RightArrow,
+        HostKeyCode::Up => InputKeyCode::UpArrow,
+        HostKeyCode::Down => InputKeyCode::DownArrow,
+        HostKeyCode::Shift => InputKeyCode::Shift,
+        HostKeyCode::Control => InputKeyCode::Ctrl,
+        HostKeyCode::Function(number @ 1..=12) => match number {
+            1 => InputKeyCode::F1,
+            2 => InputKeyCode::F2,
+            3 => InputKeyCode::F3,
+            4 => InputKeyCode::F4,
+            5 => InputKeyCode::F5,
+            6 => InputKeyCode::F6,
+            7 => InputKeyCode::F7,
+            8 => InputKeyCode::F8,
+            9 => InputKeyCode::F9,
+            10 => InputKeyCode::F10,
+            11 => InputKeyCode::F11,
+            12 => InputKeyCode::F12,
+            _ => unreachable!("function key range is bounded above"),
+        },
+        HostKeyCode::Backspace
+        | HostKeyCode::PageUp
+        | HostKeyCode::PageDown
+        | HostKeyCode::Home
+        | HostKeyCode::End
+        | HostKeyCode::Insert
+        | HostKeyCode::Delete
+        | HostKeyCode::Alt
+        | HostKeyCode::Character(_)
+        | HostKeyCode::Function(_)
+        | HostKeyCode::Unknown(_) => return None,
+    })
+}
+
+#[cfg(test)]
+mod hosted_input_tests {
+    use super::hosted_keycode;
+    use crate::host_api::KeyCode as HostKeyCode;
+    use crate::subsystem::resources::input_manager::KeyCode as InputKeyCode;
+
+    #[test]
+    fn maps_hosted_confirm_and_navigation_keys() {
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Return),
+            Some(InputKeyCode::Enter)
+        );
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Left),
+            Some(InputKeyCode::LeftArrow)
+        );
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Function(12)),
+            Some(InputKeyCode::F12)
+        );
+    }
+
+    #[test]
+    fn rejects_hosted_keys_without_an_fvp_input_bit() {
+        assert_eq!(hosted_keycode(HostKeyCode::Character('x')), None);
+        assert_eq!(hosted_keycode(HostKeyCode::Function(13)), None);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RfvpCoreConfig {
     pub virtual_width: u32,
@@ -749,6 +824,18 @@ impl RfvpCore {
     fn apply_pending_events_to_game_data(&mut self) {
         for event in &self.pending_events {
             match *event {
+                RfvpEvent::KeyDown { key, repeat, .. } => {
+                    if let Some(keycode) = hosted_keycode(key) {
+                        self.game_data
+                            .inputs_manager
+                            .notify_keycode_down(keycode, repeat);
+                    }
+                }
+                RfvpEvent::KeyUp { key, .. } => {
+                    if let Some(keycode) = hosted_keycode(key) {
+                        self.game_data.inputs_manager.notify_keycode_up(keycode);
+                    }
+                }
                 RfvpEvent::PointerMove { x, y, in_screen } => {
                     self.game_data.inputs_manager.notify_mouse_move(x, y);
                     self.game_data.inputs_manager.set_mouse_in(in_screen);
