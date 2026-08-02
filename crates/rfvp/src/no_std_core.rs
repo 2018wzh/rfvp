@@ -22,6 +22,11 @@ use crate::subsystem::resources::text_manager::FontEnumerator;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
 #[cfg(feature = "hosted")]
+use crate::subsystem::resources::{
+    input_manager::InputManagerSnapshotV1, thread_wrapper::ThreadWrapperSnapshotV1,
+    time::TimeSnapshotV1, timer_manager::TimerManagerSnapshotV1,
+};
+#[cfg(feature = "hosted")]
 use crate::subsystem::save_state::SaveStateSnapshotV1;
 use crate::subsystem::world::GameData;
 #[cfg(feature = "hosted")]
@@ -126,6 +131,10 @@ pub struct HostedCoreSnapshot {
     pub quit_requested: bool,
     pub save_state: SaveStateSnapshotV1,
     pub globals: crate::script::global::HostedGlobalSnapshot,
+    pub input: InputManagerSnapshotV1,
+    pub timers: TimerManagerSnapshotV1,
+    pub time: TimeSnapshotV1,
+    pub deferred_threads: ThreadWrapperSnapshotV1,
 }
 
 #[cfg(feature = "hosted")]
@@ -294,6 +303,10 @@ impl RfvpCore {
                 vm_runner.thread_manager(),
             ),
             globals: self.game_data.capture_hosted_globals(),
+            input: self.game_data.inputs_manager.capture_snapshot_v1(),
+            timers: self.game_data.timer_manager.capture_snapshot_v1(),
+            time: self.game_data.time_ref().capture_snapshot_v1(),
+            deferred_threads: self.game_data.thread_wrapper.capture_snapshot_v1(),
         })
     }
 
@@ -312,6 +325,18 @@ impl RfvpCore {
         if !self.game_data.restore_hosted_globals(&snapshot.globals) {
             return Err(RfvpError::InvalidData);
         }
+        self.game_data
+            .inputs_manager
+            .apply_snapshot_v1(snapshot.input.clone());
+        self.game_data
+            .timer_manager
+            .apply_snapshot_v1(snapshot.timers.clone());
+        self.game_data
+            .time_mut_ref()
+            .apply_snapshot_v1(snapshot.time.clone());
+        self.game_data
+            .thread_wrapper
+            .apply_snapshot_v1(snapshot.deferred_threads.clone());
         self.frame_index = snapshot.frame_index;
         self.last_tick_us = snapshot.last_tick_us;
         self.quit_requested = snapshot.quit_requested;
