@@ -76,15 +76,17 @@ impl BgmPlayer {
         Ok(())
     }
 
-    pub fn load_named(&mut self, slot: i32, name: impl Into<String>, vfs: &Vfs) -> Result<()> {
+    /// Queues a named resource for the hosted adapter to resolve under its VFS
+    /// policy. The hosted core must not read the embedding process filesystem:
+    /// that would bypass the adapter's binding and resource budget checks.
+    pub fn load_named(&mut self, slot: i32, name: impl Into<String>) -> Result<()> {
         let name = name.into();
-        let bytes = vfs.read_file(&name)?;
         let slot = checked_slot(slot)?;
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: encoded_kind_from_path(&name),
             resource_uri: Some(name.clone()),
-            bytes,
+            bytes: Vec::new(),
         });
         self.loaded[slot] = true;
         self.names[slot] = Some(name);
@@ -221,7 +223,7 @@ impl BgmPlayer {
             self.repeat[i] = slot.repeat;
             self.pan[i] = slot.pan as f64;
             if let Some(path) = slot.path.as_ref() {
-                self.load_named(i as i32, path.clone(), vfs)?;
+                self.load_named(i as i32, path.clone())?;
             }
             if slot.playing {
                 self.play(
@@ -280,4 +282,31 @@ pub fn encoded_kind_from_path(path: &str) -> EncodedAudioKind {
 
 fn duration_ms_u32(duration: crate::platform_time::Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn named_load_defers_bytes_to_the_hosted_adapter() {
+        let manager = Arc::new(AudioManager::new());
+        let mut player = BgmPlayer::new(Arc::clone(&manager));
+        player
+            .load_named(0, "audio/theme.ogg")
+            .expect("named resource is queued");
+
+        let mut commands = Vec::new();
+        manager.drain_commands(&mut commands);
+        assert!(matches!(
+            commands.as_slice(),
+            [AudioCommand::LoadEncoded {
+                resource_uri: Some(uri),
+                bytes,
+                ..
+            }] if uri == "audio/theme.ogg" && bytes.is_empty()
+        ));
+    }
 }
