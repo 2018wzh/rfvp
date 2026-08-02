@@ -18,8 +18,8 @@ use crate::host_api::{
 };
 #[cfg(feature = "hosted")]
 pub use crate::no_std_core::{
-    HOSTED_CORE_SNAPSHOT_VERSION, HostedCoreSnapshot as HostedSnapshot,
-    HostedStateComponentHashesV1,
+    HostedCoreSnapshot as HostedSnapshot, HostedStateComponentHashesV1,
+    HOSTED_CORE_SNAPSHOT_VERSION,
 };
 pub use crate::no_std_core::{
     RfvpBootConfig as HostedBootConfig, RfvpCore, RfvpCoreConfig as HostedConfig,
@@ -30,7 +30,7 @@ pub use crate::no_std_core::{
 pub use crate::vm_runner::HostedVmTraceRecord;
 
 /// Increment only for a deliberately incompatible hosted-core wire contract.
-pub const HOSTED_ABI_VERSION: u16 = 1;
+pub const HOSTED_ABI_VERSION: u16 = 2;
 
 /// Hard caps for one hosted transaction.  Every cap is fail-closed: a core
 /// tick that exceeds it returns `CapacityExceeded`, and no partial delta is
@@ -44,6 +44,12 @@ pub struct HostedLimits {
     pub max_audio_bytes: usize,
     pub max_text_operations: usize,
     pub max_text_bytes: usize,
+    /// Bounded structured hosted-core diagnostics retained in an Evidence
+    /// transaction.  Shipping never records these entries.
+    pub max_log_records: usize,
+    /// Accounting bound for structured diagnostic records.  Hosted records do
+    /// not contain host paths, payload bytes, or formatted engine messages.
+    pub max_log_bytes: usize,
 }
 
 impl Default for HostedLimits {
@@ -56,6 +62,8 @@ impl Default for HostedLimits {
             max_audio_bytes: 16 * 1024 * 1024,
             max_text_operations: 256,
             max_text_bytes: 128 * 1024,
+            max_log_records: 256,
+            max_log_bytes: 16 * 1024,
         }
     }
 }
@@ -170,6 +178,44 @@ pub struct HostedTextOperation {
     pub text: String,
 }
 
+/// Stable hosted-core diagnostic identity.  It deliberately carries no
+/// formatted RFVP text so an embedding cannot accidentally persist a local
+/// path, game payload, or platform handle in its observability pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedLogEvent {
+    QuitRequested,
+    CoreFailure,
+    ResourceWarning,
+    HostMessage,
+}
+
+impl HostedLogEvent {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::QuitRequested => "rfvp.host.quit_requested",
+            Self::CoreFailure => "rfvp.core.failure",
+            Self::ResourceWarning => "rfvp.resource.warning",
+            Self::HostMessage => "rfvp.host.message",
+        }
+    }
+}
+
+/// A bounded diagnostic emitted by the hosted-core boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedLogRecord {
+    pub level: RfvpLogLevel,
+    pub event: HostedLogEvent,
+}
+
+/// Phase markers are generic observer hooks.  RFVP never timestamps them;
+/// the embedding is responsible for measuring its own execution environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedPhase {
+    Input,
+    CoreTick,
+    DeltaFinalize,
+}
+
 /// The only presentation and audio result produced by one hosted step.
 ///
 /// An embedding may convert this into its own ABI payload, but must not commit
@@ -181,6 +227,8 @@ pub struct HostedStepDelta {
     pub audio: Vec<HostedAudioOperation>,
     pub video: Vec<HostedVideoOperation>,
     pub text: Vec<HostedTextOperation>,
+    pub logs: Vec<HostedLogRecord>,
+    pub log_dropped_count: u32,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -202,6 +250,15 @@ pub trait HostedStepObserver {
     fn on_step(&mut self, delta: &HostedStepDelta);
 }
 
+/// Optional, session-scoped observer for embedding-side profiling.  It has no
+/// access to RFVP state and is not part of snapshots, replay hashes, or the
+/// hosted wire format.
+pub trait HostedExecutionObserver: HostedStepObserver {
+    fn on_phase_begin(&mut self, _phase: HostedPhase) {}
+
+    fn on_phase_end(&mut self, _phase: HostedPhase) {}
+}
+
 /// A session owns its pending input, core state and capture limits.  It is not
 /// `Sync` by construction: concurrent games must use separate sessions and
 /// separate hosts rather than a process-wide lock.
@@ -212,6 +269,7 @@ pub struct HostedSession {
     // reuses texture ids across ticks; recreating this recorder per tick turns
     // those updates into duplicate creates at every embedding boundary.
     renderer: RecordingRenderer,
+    capture_logs: bool,
 }
 
 impl HostedSession {
@@ -223,6 +281,8 @@ impl HostedSession {
             || limits.max_audio_bytes == 0
             || limits.max_text_operations == 0
             || limits.max_text_bytes == 0
+            || limits.max_log_records == 0
+            || limits.max_log_bytes == 0
         {
             return Err(RfvpError::InvalidArgument);
         }
@@ -232,6 +292,7 @@ impl HostedSession {
             core,
             limits,
             renderer: RecordingRenderer::new(limits),
+            capture_logs: false,
         })
     }
 
@@ -251,7 +312,9 @@ impl HostedSession {
             } if crash_trace_capacity > 0 => crash_trace_capacity,
             HostedTraceProfile::Evidence { .. } => return Err(RfvpError::InvalidArgument),
         };
-        self.core.set_hosted_trace_capacity(capacity)
+        self.core.set_hosted_trace_capacity(capacity)?;
+        self.capture_logs = matches!(profile, HostedTraceProfile::Evidence { .. });
+        Ok(())
     }
 
     pub fn crash_trace(&self) -> RfvpResult<Vec<HostedVmTraceRecord>> {
@@ -348,7 +411,7 @@ impl HostedSession {
     where
         <H::FileSystem as RfvpFileSystem>::File: 'static,
     {
-        let mut recording = RecordingHost::new(host, self.limits);
+        let mut recording = RecordingHost::new(host, self.limits, self.capture_logs);
         self.core.boot(&mut recording, config)?;
         recording.finish()?;
         if !recording.renderer.operations.is_empty() || !recording.audio.operations.is_empty() {
@@ -375,7 +438,8 @@ impl HostedSession {
         }
 
         let renderer = std::mem::replace(&mut self.renderer, RecordingRenderer::new(self.limits));
-        let mut recording = RecordingHost::with_renderer(host, renderer, self.limits);
+        let mut recording =
+            RecordingHost::with_renderer(host, renderer, self.limits, self.capture_logs);
         let tick_result = self.core.tick(&mut recording);
         let finish_result = tick_result.and_then(|tick| recording.finish().map(|()| tick));
         self.renderer = recording.renderer;
@@ -389,6 +453,7 @@ impl HostedSession {
                 text: event.text,
             })
             .collect::<Vec<_>>();
+        let logs = recording.logs.take()?;
         Ok(HostedStepDelta {
             tick,
             scene: self.renderer.take_operations(),
@@ -409,6 +474,8 @@ impl HostedSession {
                 })
                 .collect(),
             text,
+            log_dropped_count: recording.logs.dropped_count,
+            logs,
         })
     }
 
@@ -426,6 +493,30 @@ impl HostedSession {
     {
         let delta = self.step(host, input)?;
         observer.on_step(&delta);
+        Ok(delta)
+    }
+
+    /// Runs a hosted step with generic phase callbacks for an embedding-owned
+    /// profiler.  The callbacks intentionally do not include timestamps or
+    /// product-specific data.
+    pub fn step_profiled<H: RfvpHost, O: HostedExecutionObserver>(
+        &mut self,
+        host: &mut H,
+        input: HostedStepInput,
+        observer: &mut O,
+    ) -> RfvpResult<HostedStepDelta>
+    where
+        <H::FileSystem as RfvpFileSystem>::File: 'static,
+    {
+        observer.on_phase_begin(HostedPhase::Input);
+        observer.on_phase_end(HostedPhase::Input);
+        observer.on_phase_begin(HostedPhase::CoreTick);
+        let delta = self.step(host, input);
+        observer.on_phase_end(HostedPhase::CoreTick);
+        let delta = delta?;
+        observer.on_phase_begin(HostedPhase::DeltaFinalize);
+        observer.on_step(&delta);
+        observer.on_phase_end(HostedPhase::DeltaFinalize);
         Ok(delta)
     }
 }
@@ -494,28 +585,71 @@ mod tests {
             [HostedSceneOperation::UpdateTexture(update)] if update.id == TextureId(7)
         ));
     }
+
+    #[test]
+    fn shipping_log_recorder_does_not_allocate_records() {
+        let mut logs = RecordingLogs::new(HostedLimits::default(), false);
+        logs.record(RfvpLogLevel::Error, "core failure");
+        assert!(logs.take().expect("shipping logs are valid").is_empty());
+        assert_eq!(logs.dropped_count, 0);
+    }
+
+    #[test]
+    fn evidence_log_recorder_keeps_only_structured_identity() {
+        let mut logs = RecordingLogs::new(HostedLimits::default(), true);
+        logs.record(RfvpLogLevel::Info, "a local path must not escape");
+        assert_eq!(
+            logs.take().expect("evidence log is bounded"),
+            vec![HostedLogRecord {
+                level: RfvpLogLevel::Info,
+                event: HostedLogEvent::HostMessage,
+            }]
+        );
+    }
+
+    #[test]
+    fn evidence_log_overflow_fails_closed() {
+        let limits = HostedLimits {
+            max_log_records: 1,
+            max_log_bytes: RecordingLogs::ACCOUNTED_BYTES,
+            ..HostedLimits::default()
+        };
+        let mut logs = RecordingLogs::new(limits, true);
+        logs.record(RfvpLogLevel::Info, "first");
+        logs.record(RfvpLogLevel::Info, "second");
+        assert_eq!(logs.take(), Err(RfvpError::CapacityExceeded));
+        assert_eq!(logs.dropped_count, 1);
+    }
 }
 
 struct RecordingHost<'a, H: RfvpHost> {
     inner: &'a mut H,
     renderer: RecordingRenderer,
     audio: RecordingAudio,
+    logs: RecordingLogs,
 }
 
 impl<'a, H: RfvpHost> RecordingHost<'a, H> {
-    fn new(inner: &'a mut H, limits: HostedLimits) -> Self {
+    fn new(inner: &'a mut H, limits: HostedLimits, capture_logs: bool) -> Self {
         Self {
             inner,
             renderer: RecordingRenderer::new(limits),
             audio: RecordingAudio::new(limits),
+            logs: RecordingLogs::new(limits, capture_logs),
         }
     }
 
-    fn with_renderer(inner: &'a mut H, renderer: RecordingRenderer, limits: HostedLimits) -> Self {
+    fn with_renderer(
+        inner: &'a mut H,
+        renderer: RecordingRenderer,
+        limits: HostedLimits,
+        capture_logs: bool,
+    ) -> Self {
         Self {
             inner,
             renderer,
             audio: RecordingAudio::new(limits),
+            logs: RecordingLogs::new(limits, capture_logs),
         }
     }
 
@@ -549,10 +683,68 @@ impl<H: RfvpHost> RfvpHost for RecordingHost<'_, H> {
 
     fn log(&mut self, level: RfvpLogLevel, message: &str) {
         self.inner.log(level, message);
+        self.logs.record(level, message);
     }
 
     fn platform_callbacks(&mut self) -> PlatformCallbacks {
         self.inner.platform_callbacks()
+    }
+}
+
+struct RecordingLogs {
+    limits: HostedLimits,
+    enabled: bool,
+    bytes: usize,
+    records: Vec<HostedLogRecord>,
+    dropped_count: u32,
+}
+
+impl RecordingLogs {
+    const ACCOUNTED_BYTES: usize = 16;
+
+    fn new(limits: HostedLimits, enabled: bool) -> Self {
+        Self {
+            limits,
+            enabled,
+            bytes: 0,
+            records: Vec::new(),
+            dropped_count: 0,
+        }
+    }
+
+    fn record(&mut self, level: RfvpLogLevel, message: &str) {
+        if !self.enabled {
+            return;
+        }
+        let event = classify_hosted_log(level, message);
+        let next_bytes = self.bytes.saturating_add(Self::ACCOUNTED_BYTES);
+        if self.records.len() >= self.limits.max_log_records
+            || next_bytes > self.limits.max_log_bytes
+        {
+            self.dropped_count = self.dropped_count.saturating_add(1);
+            return;
+        }
+        self.bytes = next_bytes;
+        self.records.push(HostedLogRecord { level, event });
+    }
+
+    fn take(&mut self) -> RfvpResult<Vec<HostedLogRecord>> {
+        if self.dropped_count != 0 {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        Ok(std::mem::take(&mut self.records))
+    }
+}
+
+fn classify_hosted_log(level: RfvpLogLevel, message: &str) -> HostedLogEvent {
+    if message == "quit requested by host event" {
+        HostedLogEvent::QuitRequested
+    } else if matches!(level, RfvpLogLevel::Error) {
+        HostedLogEvent::CoreFailure
+    } else if matches!(level, RfvpLogLevel::Warn) {
+        HostedLogEvent::ResourceWarning
+    } else {
+        HostedLogEvent::HostMessage
     }
 }
 
