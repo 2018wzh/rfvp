@@ -638,4 +638,7 @@ fn vm_mod(a: Variant, b: Variant) -> Variant {
 
 pub trait VmSyscall {
     fn do_syscall(&mut self, name: &str, args: Vec<Variant>) -> anyhow::Result<Variant>;
+
+    #[cfg(feature = "hosted")]
+    fn with_globals<R>(&mut self, callback: impl FnOnce(&mut global::Global) -> R) -> R;
 }

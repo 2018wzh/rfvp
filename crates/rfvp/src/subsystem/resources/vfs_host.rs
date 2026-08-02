@@ -1,12 +1,15 @@
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::mem::size_of;
 
 use anyhow::{anyhow, bail, Result};
 
 use crate::script::parser::Nls;
+use crate::host_api::RfvpFile;
 use crate::utils::stable_hash::StableHashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -14,7 +17,95 @@ use std::path::PathBuf;
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 
-pub type VfsStream = Box<dyn ReadSeek + Send + Sync>;
+/// Hosted resource streams deliberately stay on the session thread.  The
+/// embedding owns cross-thread decoder scheduling; RFVP does not require a
+/// `Send + Sync` file handle just to access a bounded pack subrange.
+pub type VfsStream = Box<dyn ReadSeek>;
+
+struct HostedPackReader {
+    file: Rc<RefCell<Box<dyn RfvpFile>>>,
+    base: u64,
+    length: Option<u64>,
+    position: u64,
+}
+
+impl HostedPackReader {
+    fn new(file: Rc<RefCell<Box<dyn RfvpFile>>>, base: u64, length: Option<u64>) -> Self {
+        Self {
+            file,
+            base,
+            length,
+            position: 0,
+        }
+    }
+
+    fn io_error(error: crate::host_api::RfvpError) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+    }
+
+    fn total_length(&self) -> std::io::Result<u64> {
+        match self.length {
+            Some(length) => Ok(length),
+            None => {
+                let mut file = self.file.try_borrow_mut().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::Other, "host pack is already borrowed")
+                })?;
+                let length = file.len().map_err(Self::io_error)?;
+                length.checked_sub(self.base).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "host pack base exceeds file length")
+                })
+            }
+        }
+    }
+}
+
+impl Read for HostedPackReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.total_length()?.saturating_sub(self.position);
+        if remaining == 0 || buffer.is_empty() {
+            return Ok(0);
+        }
+        let request = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let offset = self.base.checked_add(self.position).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "host pack offset overflow")
+        })?;
+        let mut file = self.file.try_borrow_mut().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "host pack is already borrowed")
+        })?;
+        let read = file.read_at(offset, &mut buffer[..request]).map_err(Self::io_error)?;
+        if read > request {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "host pack returned more bytes than requested",
+            ));
+        }
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "host pack position overflow")
+        })?;
+        Ok(read)
+    }
+}
+
+impl Seek for HostedPackReader {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let end = self.total_length()?;
+        let target = match from {
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
+            SeekFrom::End(delta) => i128::from(end) + i128::from(delta),
+        };
+        if target < 0 || target > i128::from(end) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek falls outside hosted pack range",
+            ));
+        }
+        self.position = target as u64;
+        Ok(self.position)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct VfsEntry {
@@ -22,7 +113,24 @@ pub struct VfsEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+enum PackSource {
+    Bytes(Vec<u8>),
+    Hosted(Rc<RefCell<Box<dyn RfvpFile>>>),
+}
+
+impl core::fmt::Debug for PackSource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Bytes(bytes) => formatter
+                .debug_tuple("Bytes")
+                .field(&bytes.len())
+                .finish(),
+            Self::Hosted(_) => formatter.write_str("Hosted(range-read)"),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct VfsFile {
     pub path: PathBuf,
     pub folder_name: String,
@@ -30,7 +138,7 @@ pub struct VfsFile {
     pub filename_table_size: u64,
     pub entries: StableHashMap<String, VfsEntry>,
     pub nls: Nls,
-    pack_bytes: Vec<u8>,
+    source: PackSource,
     overrides: StableHashMap<String, Vec<u8>>,
 }
 
@@ -45,7 +153,30 @@ impl VfsFile {
             filename_table_size,
             entries,
             nls,
-            pack_bytes,
+            source: PackSource::Bytes(pack_bytes),
+            overrides: StableHashMap::default(),
+        })
+    }
+
+    /// Parse only pack metadata from a host-owned range-readable file.  Pack
+    /// bodies are never copied into RFVP memory; each entry is served by a
+    /// bounded subrange reader when an engine subsystem actually opens it.
+    pub fn from_host_file(
+        folder_name: String,
+        file: Box<dyn RfvpFile>,
+        nls: Nls,
+    ) -> Result<Self> {
+        let source = Rc::new(RefCell::new(file));
+        let mut reader = HostedPackReader::new(source.clone(), 0, None);
+        let (file_count, filename_table_size, entries) = Self::parse_reader(&mut reader, nls)?;
+        Ok(Self {
+            path: PathBuf::from(format!("{folder_name}.bin").as_str()),
+            folder_name,
+            file_count,
+            filename_table_size,
+            entries,
+            nls,
+            source: PackSource::Hosted(source),
             overrides: StableHashMap::default(),
         })
     }
@@ -154,25 +285,30 @@ impl VfsFile {
             .entries
             .get(name)
             .ok_or_else(|| anyhow!("file not found in host pack {}: {}", self.folder_name, name))?;
-        let start = usize::try_from(ent.offset).map_err(|_| anyhow!("pack offset too large"))?;
-        let size = usize::try_from(ent.size).map_err(|_| anyhow!("pack entry too large"))?;
-        let end = start
-            .checked_add(size)
-            .ok_or_else(|| anyhow!("pack entry overflow"))?;
-        if end > self.pack_bytes.len() {
-            bail!(
-                "pack entry out of range: {}/{} offset={} size={} pack_size={}",
-                self.folder_name,
-                name,
-                ent.offset,
-                ent.size,
-                self.pack_bytes.len()
-            );
+        match &self.source {
+            PackSource::Bytes(pack_bytes) => {
+                let start = usize::try_from(ent.offset).map_err(|_| anyhow!("pack offset too large"))?;
+                let size = usize::try_from(ent.size).map_err(|_| anyhow!("pack entry too large"))?;
+                let end = start
+                    .checked_add(size)
+                    .ok_or_else(|| anyhow!("pack entry overflow"))?;
+                if end > pack_bytes.len() {
+                    bail!(
+                        "pack entry out of range: {}/{} offset={} size={} pack_size={}",
+                        self.folder_name,
+                        name,
+                        ent.offset,
+                        ent.size,
+                        pack_bytes.len()
+                    );
+                }
+                Ok((Box::new(Cursor::new(pack_bytes[start..end].to_vec())), Some(ent.size)))
+            }
+            PackSource::Hosted(file) => Ok((
+                Box::new(HostedPackReader::new(file.clone(), ent.offset, Some(ent.size))),
+                Some(ent.size),
+            )),
         }
-        Ok((
-            Box::new(Cursor::new(self.pack_bytes[start..end].to_vec())),
-            Some(ent.size),
-        ))
     }
 
     pub fn open_stream(&self, name: &str) -> Result<VfsStream> {
@@ -227,6 +363,16 @@ impl Vfs {
             .unwrap_or(folder_name)
             .to_ascii_lowercase();
         let file = VfsFile::from_pack_bytes(folder.clone(), bytes, self.nls)?;
+        self.files.insert(folder, file);
+        Ok(())
+    }
+
+    pub fn add_host_pack(&mut self, folder_name: &str, file: Box<dyn RfvpFile>) -> Result<()> {
+        let folder = folder_name
+            .strip_suffix(".bin")
+            .unwrap_or(folder_name)
+            .to_ascii_lowercase();
+        let file = VfsFile::from_host_file(folder.clone(), file, self.nls)?;
         self.files.insert(folder, file);
         Ok(())
     }

@@ -1,5 +1,6 @@
 #[cfg(not(feature = "old_school"))]
 use alloc::format;
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -9,6 +10,7 @@ use crate::host_api::{
     RfvpFile, RfvpFileInfo, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpResult,
 };
 use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::parser::{Nls, Parser};
 use crate::subsystem::anzu_scene::AnzuScene;
@@ -17,6 +19,8 @@ use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
 use crate::subsystem::world::GameData;
 use crate::vm_runner::VmRunner;
+#[cfg(feature = "hosted")]
+use crate::subsystem::save_state::SaveStateSnapshotV1;
 #[cfg(feature = "old_school")]
 use core_maths::CoreFloat;
 
@@ -104,6 +108,23 @@ pub struct RfvpLoadedGame {
     pub hcb_manifest: Vec<RfvpResourceEntry>,
 }
 
+/// In-memory exact checkpoint for a hosted session.  It contains no host
+/// handles or platform paths and is valid only for the already-booted session
+/// with the same loaded game and resource binding.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone)]
+pub struct HostedCoreSnapshot {
+    pub version: u16,
+    pub frame_index: u64,
+    pub last_tick_us: Option<u64>,
+    pub quit_requested: bool,
+    pub save_state: SaveStateSnapshotV1,
+    pub globals: crate::script::global::HostedGlobalSnapshot,
+}
+
+#[cfg(feature = "hosted")]
+pub const HOSTED_CORE_SNAPSHOT_VERSION: u16 = 1;
+
 pub struct RfvpCore {
     config: RfvpCoreConfig,
     pending_events: Vec<RfvpEvent>,
@@ -167,6 +188,48 @@ impl RfvpCore {
 
     pub fn last_error_detail(&self) -> Option<&str> {
         self.last_error_detail.as_deref()
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn capture_hosted_snapshot(&self) -> RfvpResult<HostedCoreSnapshot> {
+        if self.run_state != RfvpCoreRunState::Booted {
+            return Err(RfvpError::InvalidData);
+        }
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        Ok(HostedCoreSnapshot {
+            version: HOSTED_CORE_SNAPSHOT_VERSION,
+            frame_index: self.frame_index,
+            last_tick_us: self.last_tick_us,
+            quit_requested: self.quit_requested,
+            save_state: SaveStateSnapshotV1::capture_hosted(
+                &self.game_data,
+                vm_runner.thread_manager(),
+            ),
+            globals: self.game_data.capture_hosted_globals(),
+        })
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn restore_hosted_snapshot(&mut self, snapshot: &HostedCoreSnapshot) -> RfvpResult<()> {
+        if snapshot.version != HOSTED_CORE_SNAPSHOT_VERSION
+            || self.run_state != RfvpCoreRunState::Booted
+        {
+            return Err(RfvpError::InvalidData);
+        }
+        let vm_runner = self.vm_runner.as_mut().ok_or(RfvpError::InvalidData)?;
+        snapshot
+            .save_state
+            .apply(&mut self.game_data, vm_runner.thread_manager_mut())
+            .map_err(|_| RfvpError::InvalidData)?;
+        if !self.game_data.restore_hosted_globals(&snapshot.globals) {
+            return Err(RfvpError::InvalidData);
+        }
+        self.frame_index = snapshot.frame_index;
+        self.last_tick_us = snapshot.last_tick_us;
+        self.quit_requested = snapshot.quit_requested;
+        self.last_error = None;
+        self.last_error_detail = None;
+        Ok(())
     }
 
     pub fn push_event(&mut self, event: RfvpEvent) -> RfvpResult<()> {
@@ -280,16 +343,21 @@ impl RfvpCore {
                 scale_old_school_u32(screen.1, old_school_scale),
             );
         }
-        GLOBAL.lock().map_err(|_| RfvpError::Backend)?.init_with(
-            parser.get_non_volatile_global_count(),
-            parser.get_volatile_global_count(),
-        );
-
         let mut vfs = build_host_vfs(host, boot)?;
         #[cfg(not(feature = "old_school"))]
         vfs.add_loose_file(&hcb.path, hcb.bytes.clone());
 
         let mut game_data = GameData::default();
+        #[cfg(feature = "hosted")]
+        game_data.init_hosted_globals(
+            parser.get_non_volatile_global_count(),
+            parser.get_volatile_global_count(),
+        );
+        #[cfg(not(feature = "hosted"))]
+        GLOBAL.lock().map_err(|_| RfvpError::Backend)?.init_with(
+            parser.get_non_volatile_global_count(),
+            parser.get_volatile_global_count(),
+        );
         #[cfg(feature = "old_school")]
         game_data.set_old_school_scale(old_school_scale);
         game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
@@ -676,7 +744,10 @@ struct LoadedHcb {
     info: RfvpFileInfo,
 }
 
-fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<Vfs> {
+fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<Vfs>
+where
+    <H::FileSystem as RfvpFileSystem>::File: 'static,
+{
     let mut vfs = Vfs::new(boot.nls).map_err(|_| RfvpError::InvalidData)?;
     #[cfg(feature = "old_school")]
     {
@@ -699,18 +770,17 @@ fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpRe
                 .enumerate_by_extension(boot.asset_root, "bin", visitor)?;
         }
         for path in packs {
-            let mut file = host.fs().open(&path)?;
-            let bytes = file.read_to_vec(usize::MAX)?;
             let folder = path
                 .rsplit('/')
                 .next()
                 .unwrap_or(path.as_str())
                 .strip_suffix(".bin")
                 .unwrap_or(path.as_str());
-            vfs.add_pack_bytes(folder, bytes).map_err(|err| {
+            let file = host.fs().open(&path)?;
+            vfs.add_host_pack(folder, Box::new(file)).map_err(|err| {
                 host.log(
                     RfvpLogLevel::Warn,
-                    &format!("failed to parse host pack {path}: {err}"),
+                    &format!("failed to parse host pack metadata {path}: {err}"),
                 );
                 RfvpError::InvalidData
             })?;
