@@ -3,6 +3,8 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+#[cfg(feature = "hosted")]
+use serde::{Deserialize, Serialize};
 
 use crate::font::Font;
 use crate::host_api::{
@@ -114,7 +116,7 @@ pub struct RfvpLoadedGame {
 /// handles or platform paths and is valid only for the already-booted session
 /// with the same loaded game and resource binding.
 #[cfg(feature = "hosted")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostedCoreSnapshot {
     pub version: u16,
     pub frame_index: u64,

@@ -7,6 +7,9 @@
 
 use alloc::vec::Vec;
 
+#[cfg(feature = "hosted")]
+const MAX_HOSTED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+
 use crate::host_api::{
     AudioParams, AudioStreamDesc, AudioStreamId, ColorRgba, DrawSolidCommand, DrawSpriteCommand,
     EncodedAudioKind, PixelFormat, PlatformCallbacks, RfvpAudio, RfvpError, RfvpEvent,
@@ -231,6 +234,26 @@ impl HostedSession {
 
     pub fn restore(&mut self, snapshot: &HostedSnapshot) -> RfvpResult<()> {
         self.core.restore_hosted_snapshot(snapshot)
+    }
+
+    /// Stable opaque persistence form for a hosted checkpoint.  Embedders may
+    /// place these bytes in their own save container, but must bind them to the
+    /// same hosted ABI and game identity before restore.
+    pub fn snapshot_bytes(&self) -> RfvpResult<Vec<u8>> {
+        let bytes = bincode::serialize(&self.snapshot()?).map_err(|_| RfvpError::InvalidData)?;
+        if bytes.len() > MAX_HOSTED_SNAPSHOT_BYTES {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        Ok(bytes)
+    }
+
+    pub fn restore_bytes(&mut self, bytes: &[u8]) -> RfvpResult<()> {
+        if bytes.is_empty() || bytes.len() > MAX_HOSTED_SNAPSHOT_BYTES {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        let snapshot: HostedSnapshot =
+            bincode::deserialize(bytes).map_err(|_| RfvpError::InvalidData)?;
+        self.restore(&snapshot)
     }
 
     /// Boot through the same constrained ports used by `step`.  A boot that

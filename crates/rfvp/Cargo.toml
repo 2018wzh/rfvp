@@ -106,7 +106,7 @@ default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "r
 # A standard-library embedding of the portable RFVP core.  This selects the
 # host-neutral resource/render/audio modules without enabling the upstream
 # window or GPU product hosts.
-hosted = ["no_std"]
+hosted = ["no_std", "dep:bincode"]
 
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:
