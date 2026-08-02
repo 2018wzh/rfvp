@@ -172,6 +172,31 @@ struct HostedCanonicalStateV1 {
     vm: ThreadManagerSnapshotV1,
 }
 
+/// Digest-only hosted state breakdown for restore diagnostics.  It exposes no
+/// script payload, resource bytes or host paths.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedStateComponentHashesV1 {
+    pub session: [u8; 32],
+    pub globals: [u8; 32],
+    pub input_and_time: [u8; 32],
+    pub runtime: [u8; 32],
+    pub motion: [u8; 32],
+    pub audio: [u8; 32],
+    pub vm: [u8; 32],
+}
+
+#[cfg(feature = "hosted")]
+fn hosted_component_hash<T: Serialize>(value: &T) -> RfvpResult<[u8; 32]> {
+    let bytes = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .serialize(value)
+        .map_err(|_| RfvpError::InvalidData)?;
+    use sha2::Digest;
+    Ok(sha2::Sha256::digest(bytes).into())
+}
+
 pub struct RfvpCore {
     config: RfvpCoreConfig,
     pending_events: Vec<RfvpEvent>,
@@ -387,11 +412,47 @@ impl RfvpCore {
     /// [`Self::capture_hosted_snapshot`] instead.
     #[cfg(feature = "hosted")]
     pub fn canonical_hosted_state_bytes(&self) -> RfvpResult<Vec<u8>> {
+        let state = self.capture_canonical_hosted_state()?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .serialize(&state)
+            .map_err(|_| RfvpError::InvalidData)
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn canonical_hosted_state_component_hashes(
+        &self,
+    ) -> RfvpResult<HostedStateComponentHashesV1> {
+        let state = self.capture_canonical_hosted_state()?;
+        Ok(HostedStateComponentHashesV1 {
+            session: hosted_component_hash(&(
+                state.version,
+                state.frame_index,
+                state.last_tick_us,
+                state.quit_requested,
+            ))?,
+            globals: hosted_component_hash(&state.globals)?,
+            input_and_time: hosted_component_hash(&(
+                &state.input,
+                &state.timers,
+                &state.time,
+                &state.deferred_threads,
+            ))?,
+            runtime: hosted_component_hash(&(&state.runtime_state, &state.global_state))?,
+            motion: hosted_component_hash(&state.motion)?,
+            audio: hosted_component_hash(&state.audio)?,
+            vm: hosted_component_hash(&state.vm)?,
+        })
+    }
+
+    #[cfg(feature = "hosted")]
+    fn capture_canonical_hosted_state(&self) -> RfvpResult<HostedCanonicalStateV1> {
         if self.run_state != RfvpCoreRunState::Booted {
             return Err(RfvpError::InvalidData);
         }
         let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
-        let state = HostedCanonicalStateV1 {
+        Ok(HostedCanonicalStateV1 {
             version: 1,
             frame_index: self.frame_index,
             last_tick_us: self.last_tick_us,
@@ -409,12 +470,7 @@ impl RfvpCore {
                 se: self.game_data.se_player_ref().capture_snapshot_v1(),
             },
             vm: vm_runner.thread_manager().capture_snapshot_v1(),
-        };
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_little_endian()
-            .serialize(&state)
-            .map_err(|_| RfvpError::InvalidData)
+        })
     }
 
     pub fn push_event(&mut self, event: RfvpEvent) -> RfvpResult<()> {

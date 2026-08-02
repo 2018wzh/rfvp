@@ -17,7 +17,10 @@ use crate::host_api::{
     TextureRect,
 };
 #[cfg(feature = "hosted")]
-pub use crate::no_std_core::{HostedCoreSnapshot as HostedSnapshot, HOSTED_CORE_SNAPSHOT_VERSION};
+pub use crate::no_std_core::{
+    HostedCoreSnapshot as HostedSnapshot, HostedStateComponentHashesV1,
+    HOSTED_CORE_SNAPSHOT_VERSION,
+};
 pub use crate::no_std_core::{
     RfvpBootConfig as HostedBootConfig, RfvpCore, RfvpCoreConfig as HostedConfig,
     RfvpCoreRunState as HostedRunState, RfvpLoadedGame as HostedLoadedGame,
@@ -275,6 +278,11 @@ impl HostedSession {
     /// representation and must not be used as a persistence payload.
     pub fn canonical_state_bytes(&self) -> RfvpResult<Vec<u8>> {
         self.core.canonical_hosted_state_bytes()
+    }
+
+    /// Digest-only breakdown for a restore mismatch investigation.
+    pub fn canonical_state_component_hashes(&self) -> RfvpResult<HostedStateComponentHashesV1> {
+        self.core.canonical_hosted_state_component_hashes()
     }
 
     pub fn restore_bytes(&mut self, bytes: &[u8]) -> RfvpResult<()> {
