@@ -879,17 +879,17 @@ impl RfvpCore {
                     if let Some(resource_uri) = resource_uri {
                         host.audio().load_resource(id, kind, &resource_uri)?;
                     } else {
-                        host.audio().load_encoded(id, kind, &bytes)?;
+                        host.audio().load_encoded_owned(id, kind, bytes)?;
                     }
                 }
                 crate::rfvp_audio::AudioCommand::CreateStream { id, desc } => {
                     host.audio().create_stream(id, desc)?;
                 }
                 crate::rfvp_audio::AudioCommand::SubmitI16 { id, samples } => {
-                    host.audio().submit_i16(id, &samples)?;
+                    host.audio().submit_i16_owned(id, samples)?;
                 }
                 crate::rfvp_audio::AudioCommand::SubmitF32 { id, samples } => {
-                    host.audio().submit_f32(id, &samples)?;
+                    host.audio().submit_f32_owned(id, samples)?;
                 }
                 crate::rfvp_audio::AudioCommand::Play {
                     id,

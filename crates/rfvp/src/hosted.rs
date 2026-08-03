@@ -207,6 +207,20 @@ pub struct HostedLogRecord {
     pub event: HostedLogEvent,
 }
 
+/// Per-step payload movement accounting. These counters are observational:
+/// they are excluded from snapshots and all deterministic state hashes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostedCopyTelemetry {
+    /// Required copies from RFVP-owned graphic storage into hosted capture.
+    pub capture_bytes: u64,
+    /// Payload bytes retained by typed hosted operations.
+    pub operation_bytes: u64,
+    /// PCM bytes transferred by moving their existing allocation.
+    pub pcm_moved_bytes: u64,
+    /// PCM bytes copied because a caller supplied only a borrowed slice.
+    pub pcm_copied_bytes: u64,
+}
+
 /// Phase markers are generic observer hooks.  RFVP never timestamps them;
 /// the embedding is responsible for measuring its own execution environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +243,7 @@ pub struct HostedStepDelta {
     pub text: Vec<HostedTextOperation>,
     pub logs: Vec<HostedLogRecord>,
     pub log_dropped_count: u32,
+    pub copy_telemetry: HostedCopyTelemetry,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -454,6 +469,8 @@ impl HostedSession {
             })
             .collect::<Vec<_>>();
         let logs = recording.logs.take()?;
+        let scene_telemetry = self.renderer.take_copy_telemetry();
+        let audio_telemetry = recording.audio.copy_telemetry;
         Ok(HostedStepDelta {
             tick,
             scene: self.renderer.take_operations(),
@@ -476,6 +493,14 @@ impl HostedSession {
             text,
             log_dropped_count: recording.logs.dropped_count,
             logs,
+            copy_telemetry: HostedCopyTelemetry {
+                capture_bytes: scene_telemetry.capture_bytes,
+                operation_bytes: scene_telemetry
+                    .operation_bytes
+                    .saturating_add(audio_telemetry.operation_bytes),
+                pcm_moved_bytes: audio_telemetry.pcm_moved_bytes,
+                pcm_copied_bytes: audio_telemetry.pcm_copied_bytes,
+            },
         })
     }
 
@@ -556,6 +581,37 @@ mod tests {
             [HostedAudioOperation::LoadResource { resource_uri, .. }]
                 if resource_uri == "audio/theme.ogg"
         ));
+    }
+
+    #[test]
+    fn recording_audio_moves_owned_pcm_without_copying() {
+        let mut audio = RecordingAudio::new(HostedLimits::default());
+        let samples = vec![1_i16, -2, 3, -4];
+        let allocation = samples.as_ptr();
+
+        audio
+            .submit_i16_owned(AudioStreamId(5), samples)
+            .expect("owned PCM is accepted");
+
+        let HostedAudioOperation::SubmitI16 { samples, .. } = &audio.operations[0] else {
+            panic!("owned PCM must remain a typed submit operation");
+        };
+        assert_eq!(samples.as_ptr(), allocation);
+        assert_eq!(audio.copy_telemetry.pcm_moved_bytes, 8);
+        assert_eq!(audio.copy_telemetry.pcm_copied_bytes, 0);
+        assert_eq!(audio.copy_telemetry.operation_bytes, 8);
+    }
+
+    #[test]
+    fn recording_audio_accounts_borrowed_pcm_as_a_copy() {
+        let mut audio = RecordingAudio::new(HostedLimits::default());
+        audio
+            .submit_f32(AudioStreamId(6), &[0.25, -0.25])
+            .expect("borrowed PCM is accepted");
+
+        assert_eq!(audio.copy_telemetry.pcm_moved_bytes, 0);
+        assert_eq!(audio.copy_telemetry.pcm_copied_bytes, 8);
+        assert_eq!(audio.copy_telemetry.operation_bytes, 8);
     }
 
     #[test]
@@ -754,6 +810,7 @@ struct RecordingRenderer {
     operations: Vec<HostedSceneOperation>,
     textures: Vec<(TextureId, TextureDesc)>,
     failure: Option<RfvpError>,
+    copy_telemetry: HostedCopyTelemetry,
 }
 
 impl RecordingRenderer {
@@ -764,6 +821,7 @@ impl RecordingRenderer {
             operations: Vec::new(),
             textures: Vec::new(),
             failure: None,
+            copy_telemetry: HostedCopyTelemetry::default(),
         }
     }
 
@@ -785,11 +843,16 @@ impl RecordingRenderer {
         std::mem::take(&mut self.operations)
     }
 
+    fn take_copy_telemetry(&mut self) -> HostedCopyTelemetry {
+        core::mem::take(&mut self.copy_telemetry)
+    }
+
     fn reset_resources(&mut self) {
         self.texture_bytes = 0;
         self.operations.clear();
         self.textures.clear();
         self.failure = None;
+        self.copy_telemetry = HostedCopyTelemetry::default();
     }
 
     fn reserve_texture_bytes(&mut self, additional: usize) -> RfvpResult<()> {
@@ -818,6 +881,14 @@ impl RfvpRenderer for RecordingRenderer {
             .map(|pixels| {
                 validate_texture_pixels(desc, pixels.len())?;
                 self.reserve_texture_bytes(pixels.len())?;
+                self.copy_telemetry.capture_bytes = self
+                    .copy_telemetry
+                    .capture_bytes
+                    .saturating_add(pixels.len() as u64);
+                self.copy_telemetry.operation_bytes = self
+                    .copy_telemetry
+                    .operation_bytes
+                    .saturating_add(pixels.len() as u64);
                 Ok::<Vec<u8>, RfvpError>(pixels.to_vec())
             })
             .transpose()?;
@@ -874,6 +945,14 @@ impl RfvpRenderer for RecordingRenderer {
         }
         validate_texture_region(desc, rect, pixels.len())?;
         self.reserve_texture_bytes(pixels.len())?;
+        self.copy_telemetry.capture_bytes = self
+            .copy_telemetry
+            .capture_bytes
+            .saturating_add(pixels.len() as u64);
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(pixels.len() as u64);
         self.push(HostedSceneOperation::UpdateTexture(HostedTextureUpdate {
             id,
             rect,
@@ -976,6 +1055,7 @@ struct RecordingAudio {
     audio_bytes: usize,
     operations: Vec<HostedAudioOperation>,
     failure: Option<RfvpError>,
+    copy_telemetry: HostedCopyTelemetry,
 }
 
 impl RecordingAudio {
@@ -985,6 +1065,7 @@ impl RecordingAudio {
             audio_bytes: 0,
             operations: Vec::new(),
             failure: None,
+            copy_telemetry: HostedCopyTelemetry::default(),
         }
     }
 
@@ -1038,11 +1119,29 @@ impl RfvpAudio for RecordingAudio {
         bytes: &[u8],
     ) -> RfvpResult<()> {
         self.reserve_audio_bytes(bytes.len())?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes.len() as u64);
         self.push(HostedAudioOperation::LoadEncoded {
             id,
             kind,
             bytes: bytes.to_vec(),
         })
+    }
+
+    fn load_encoded_owned(
+        &mut self,
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        bytes: Vec<u8>,
+    ) -> RfvpResult<()> {
+        self.reserve_audio_bytes(bytes.len())?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes.len() as u64);
+        self.push(HostedAudioOperation::LoadEncoded { id, kind, bytes })
     }
 
     fn create_stream(&mut self, id: AudioStreamId, desc: AudioStreamDesc) -> RfvpResult<()> {
@@ -1055,10 +1154,35 @@ impl RfvpAudio for RecordingAudio {
             .checked_mul(core::mem::size_of::<i16>())
             .ok_or(RfvpError::CapacityExceeded)?;
         self.reserve_audio_bytes(bytes)?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes as u64);
+        self.copy_telemetry.pcm_copied_bytes = self
+            .copy_telemetry
+            .pcm_copied_bytes
+            .saturating_add(bytes as u64);
         self.push(HostedAudioOperation::SubmitI16 {
             id,
             samples: samples.to_vec(),
         })
+    }
+
+    fn submit_i16_owned(&mut self, id: AudioStreamId, samples: Vec<i16>) -> RfvpResult<()> {
+        let bytes = samples
+            .len()
+            .checked_mul(core::mem::size_of::<i16>())
+            .ok_or(RfvpError::CapacityExceeded)?;
+        self.reserve_audio_bytes(bytes)?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes as u64);
+        self.copy_telemetry.pcm_moved_bytes = self
+            .copy_telemetry
+            .pcm_moved_bytes
+            .saturating_add(bytes as u64);
+        self.push(HostedAudioOperation::SubmitI16 { id, samples })
     }
 
     fn submit_f32(&mut self, id: AudioStreamId, samples: &[f32]) -> RfvpResult<()> {
@@ -1067,10 +1191,35 @@ impl RfvpAudio for RecordingAudio {
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or(RfvpError::CapacityExceeded)?;
         self.reserve_audio_bytes(bytes)?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes as u64);
+        self.copy_telemetry.pcm_copied_bytes = self
+            .copy_telemetry
+            .pcm_copied_bytes
+            .saturating_add(bytes as u64);
         self.push(HostedAudioOperation::SubmitF32 {
             id,
             samples: samples.to_vec(),
         })
+    }
+
+    fn submit_f32_owned(&mut self, id: AudioStreamId, samples: Vec<f32>) -> RfvpResult<()> {
+        let bytes = samples
+            .len()
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or(RfvpError::CapacityExceeded)?;
+        self.reserve_audio_bytes(bytes)?;
+        self.copy_telemetry.operation_bytes = self
+            .copy_telemetry
+            .operation_bytes
+            .saturating_add(bytes as u64);
+        self.copy_telemetry.pcm_moved_bytes = self
+            .copy_telemetry
+            .pcm_moved_bytes
+            .saturating_add(bytes as u64);
+        self.push(HostedAudioOperation::SubmitF32 { id, samples })
     }
 
     fn play(&mut self, id: AudioStreamId, params: AudioParams, fade_in_ms: u32) -> RfvpResult<()> {
