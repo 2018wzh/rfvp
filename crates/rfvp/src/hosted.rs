@@ -643,6 +643,39 @@ mod tests {
     }
 
     #[test]
+    fn recording_renderer_recreates_same_id_when_texture_shape_changes() {
+        let mut renderer = RecordingRenderer::new(HostedLimits::default());
+        let initial = TextureDesc {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            mip_count: 1,
+        };
+        renderer
+            .create_texture(TextureId(9), initial, Some(&[1, 2, 3, 4]))
+            .expect("initial texture is accepted");
+        renderer.take_operations();
+
+        let replacement = TextureDesc {
+            width: 2,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            mip_count: 1,
+        };
+        renderer
+            .create_texture(TextureId(9), replacement, Some(&[1, 2, 3, 4, 5, 6, 7, 8]))
+            .expect("shape changes recreate the retained texture generation");
+
+        assert!(matches!(
+            renderer.take_operations().as_slice(),
+            [
+                HostedSceneOperation::DestroyTexture(TextureId(9)),
+                HostedSceneOperation::CreateTexture(texture)
+            ] if texture.id == TextureId(9) && texture.desc == replacement
+        ));
+    }
+
+    #[test]
     fn shipping_log_recorder_does_not_allocate_records() {
         let mut logs = RecordingLogs::new(HostedLimits::default(), false);
         logs.record(RfvpLogLevel::Error, "core failure");
@@ -892,9 +925,16 @@ impl RfvpRenderer for RecordingRenderer {
                 Ok::<Vec<u8>, RfvpError>(pixels.to_vec())
             })
             .transpose()?;
-        if let Some((_, previous)) = self.textures.iter().find(|(known, _)| *known == id) {
-            if *previous != desc {
-                return Err(RfvpError::InvalidData);
+        if let Some(index) = self.textures.iter().position(|(known, _)| *known == id) {
+            if self.textures[index].1 != desc {
+                let pixels = pixels.ok_or(RfvpError::InvalidData)?;
+                self.push(HostedSceneOperation::DestroyTexture(id))?;
+                self.textures[index].1 = desc;
+                return self.push(HostedSceneOperation::CreateTexture(HostedTextureData {
+                    id,
+                    desc,
+                    pixels: Some(pixels),
+                }));
             }
             let pixels = pixels.ok_or(RfvpError::InvalidData)?;
             return self.push(HostedSceneOperation::UpdateTexture(HostedTextureUpdate {
