@@ -585,7 +585,7 @@ impl MotionManager {
             Err(_) => return Ok(()),
         };
 
-        if let Some(dest) = texture.get_texture_mut().as_mut() {
+        if let Some(dest) = texture.get_texture_mut() {
             let src_x = 0;
             let src_y = 0;
             let src_w = parts.get_width() as u32;

@@ -6,9 +6,9 @@ use core_maths::CoreFloat;
 use glam::{vec2, vec3, vec4, Mat4, Vec2, Vec4};
 
 use crate::host_api::{
-    CommandBlendMode, DrawImageCmd, HitProxy, HitProxyTable, PortableTextureDesc, PrimId, RectI16,
-    RectU16, RenderBackend, RenderCommand, RenderFrame, RfvpError, RfvpResult, Rgba8,
-    TextureBackend, TextureFormat, TextureHandle, Vertex2D,
+    CommandBlendMode, DrawImageCmd, HitProxy, HitProxyTable, HostedPixelBuffer, PixelBuffer,
+    PortableTextureDesc, PrimId, RectI16, RectU16, RenderBackend, RenderCommand, RenderFrame,
+    RfvpError, RfvpResult, Rgba8, TextureBackend, TextureFormat, TextureHandle, Vertex2D,
 };
 use crate::subsystem::resources::{
     color_manager::ColorManager,
@@ -73,7 +73,7 @@ impl HostPrimRenderCache {
                 height: 1,
                 format: TextureFormat::Rgba8,
             },
-            &[255, 255, 255, 255],
+            PixelBuffer::Owned(HostedPixelBuffer::from_bytes(vec![255, 255, 255, 255])),
         )?;
         self.white_ready = true;
         Ok(())
@@ -99,11 +99,9 @@ impl HostPrimRenderCache {
         let (width, height) = img.dimensions();
         let width = u16::try_from(width).map_err(|_| RfvpError::CapacityExceeded)?;
         let height = u16::try_from(height).map_err(|_| RfvpError::CapacityExceeded)?;
-        let (format, pixels) = match img {
-            crate::DynamicImage::ImageRgba8(img) => (TextureFormat::Rgba8, img.as_raw().as_slice()),
-            crate::DynamicImage::ImageLumaA8(img) => {
-                (TextureFormat::LumaA8, img.as_raw().as_slice())
-            }
+        let format = match img.as_ref() {
+            crate::DynamicImage::ImageRgba8(_) => TextureFormat::Rgba8,
+            crate::DynamicImage::ImageLumaA8(_) => TextureFormat::LumaA8,
         };
         backend.create_texture(
             host_texture_id(graph_id),
@@ -112,7 +110,7 @@ impl HostPrimRenderCache {
                 height,
                 format,
             },
-            pixels,
+            PixelBuffer::Owned(HostedPixelBuffer::from_shared_image(img.clone())),
         )?;
         self.set_graph_generation(graph_id, generation);
         Ok(true)
@@ -533,11 +531,7 @@ where
                 // The original engine's draw_color_tile() uses only the
                 // accumulated parent position plus the tile's X/Y and W/H.
                 // Tile primitives do not apply rotation, scale, pivot, or V3D.
-                let model = Mat4::from_translation(vec3(
-                    parent_x + draw_x,
-                    parent_y + draw_y,
-                    0.0,
-                ));
+                let model = Mat4::from_translation(vec3(parent_x + draw_x, parent_y + draw_y, 0.0));
                 emit_sprite(
                     commands,
                     hit_proxies,
@@ -713,10 +707,8 @@ fn emit_graph_sprite(
     let uv0 = vec2(u / tw as f32, v / th as f32);
     let uv1 = vec2((u + tex_w) / tw as f32, (v + tex_h) / th as f32);
     let color = vec4(1.0, 1.0, 1.0, draw_alpha);
-    let off_x = graph.get_offset_x() as f32
-        + if text_graph { text_draw_x } else { clip_x };
-    let off_y = graph.get_offset_y() as f32
-        + if text_graph { text_draw_y } else { clip_y };
+    let off_x = graph.get_offset_x() as f32 + if text_graph { text_draw_x } else { clip_x };
+    let off_y = graph.get_offset_y() as f32 + if text_graph { text_draw_y } else { clip_y };
     let (pivot_x, pivot_y) = if (attr & 2) != 0 {
         (prim.get_opx() as f32, prim.get_opy() as f32)
     } else {

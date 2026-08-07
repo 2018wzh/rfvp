@@ -3,6 +3,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -12,6 +13,8 @@ use core_maths::CoreFloat;
 use image::{DynamicImage, GenericImageView, ImageBuffer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(not(feature = "no_std"))]
+use std::sync::Arc;
 
 use super::texture::NvsgTexture;
 use super::vfs::Vfs;
@@ -49,7 +52,7 @@ pub struct TextTextureRegion {
 
 #[derive(Debug, Clone)]
 pub struct GraphBuff {
-    pub texture: Option<DynamicImage>,
+    pub texture: Option<Arc<DynamicImage>>,
     pub r_value: u8,
     pub g_value: u8,
     pub b_value: u8,
@@ -294,7 +297,7 @@ impl GraphBuff {
         let px_count = (w as usize).checked_mul(h as usize)?;
         let mut out = Vec::with_capacity(px_count);
 
-        match tex {
+        match tex.as_ref() {
             DynamicImage::ImageLumaA8(img) => {
                 let raw = img.as_raw();
                 if raw.len() < px_count * 2 {
@@ -319,11 +322,11 @@ impl GraphBuff {
         Some((w as u16, h as u16, ox, oy, out))
     }
 
-    pub fn get_texture_mut(&mut self) -> &mut Option<DynamicImage> {
-        &mut self.texture
+    pub fn get_texture_mut(&mut self) -> Option<&mut DynamicImage> {
+        self.texture.as_mut().map(Arc::make_mut)
     }
 
-    pub fn get_texture(&self) -> &Option<DynamicImage> {
+    pub fn get_texture(&self) -> &Option<Arc<DynamicImage>> {
         &self.texture
     }
 
@@ -355,7 +358,7 @@ impl GraphBuff {
 
         self.unload();
         // we don't need to split the texture into multiple 256x256 textures
-        self.texture = Some(nvsg_texture.get_texture(0)?);
+        self.texture = Some(Arc::new(nvsg_texture.get_texture(0)?));
         self.r_value = 100;
         self.g_value = 100;
         self.b_value = 100;
@@ -392,7 +395,7 @@ impl GraphBuff {
         nvsg_texture.read_texture(&buff, |typ| typ == super::texture::TextureType::Single1Bit)?;
 
         self.unload();
-        self.texture = Some(nvsg_texture.get_texture(0)?);
+        self.texture = Some(Arc::new(nvsg_texture.get_texture(0)?));
         self.r_value = 100;
         self.g_value = 100;
         self.b_value = 100;
@@ -429,7 +432,7 @@ impl GraphBuff {
         nvsg_texture.read_texture(&buff, |typ| typ == super::texture::TextureType::Single8Bit)?;
 
         self.unload();
-        self.texture = Some(nvsg_texture.get_texture(0)?);
+        self.texture = Some(Arc::new(nvsg_texture.get_texture(0)?));
         self.r_value = 100;
         self.g_value = 100;
         self.b_value = 100;
@@ -544,7 +547,7 @@ impl GraphBuff {
             origin_y_px,
         )?;
 
-        let reused = match self.texture.as_mut() {
+        let reused = match self.texture.as_mut().map(Arc::make_mut) {
             Some(DynamicImage::ImageRgba8(img))
                 if img.width() == width && img.height() == height =>
             {
@@ -564,7 +567,7 @@ impl GraphBuff {
                         height
                     )
                 })?;
-            self.texture = Some(DynamicImage::ImageRgba8(img));
+            self.texture = Some(Arc::new(DynamicImage::ImageRgba8(img)));
         }
 
         self.finish_raw_rgba_load(
@@ -626,7 +629,7 @@ impl GraphBuff {
                 height
             )
         })?;
-        self.texture = Some(DynamicImage::ImageRgba8(img));
+        self.texture = Some(Arc::new(DynamicImage::ImageRgba8(img)));
         self.finish_raw_rgba_load(
             width,
             height,
@@ -737,6 +740,7 @@ impl GraphBuff {
         let Some(texture) = &mut self.texture else {
             return;
         };
+        let texture = Arc::make_mut(texture);
         let Some(texture) = texture.as_mut_rgba8() else {
             return;
         };
@@ -1027,7 +1031,7 @@ impl GraphBuff {
             load_kind: self.load_kind,
             // Pixels are authoritative: a loaded VFS texture may have been
             // mutated by a motion or parts operation after its initial load.
-            rgba: self.texture.as_ref().map(|img| match img {
+            rgba: self.texture.as_ref().map(|img| match img.as_ref() {
                 DynamicImage::ImageRgba8(rgba) => rgba.as_raw().clone(),
                 _ => img.to_rgba8().into_raw(),
             }),

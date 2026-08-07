@@ -12,9 +12,9 @@ const MAX_HOSTED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::host_api::{
     AudioParams, AudioStreamDesc, AudioStreamId, ColorRgba, DrawSolidCommand, DrawSpriteCommand,
-    EncodedAudioKind, PixelFormat, PlatformCallbacks, RfvpAudio, RfvpError, RfvpEvent, RfvpFile,
-    RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer, RfvpResult, TextureDesc, TextureId,
-    TextureRect,
+    EncodedAudioKind, HostedPixelBuffer, PixelBuffer, PixelFormat, PlatformCallbacks, RfvpAudio,
+    RfvpError, RfvpEvent, RfvpFile, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer,
+    RfvpResult, TextureDesc, TextureId, TextureRect,
 };
 #[cfg(feature = "hosted")]
 pub use crate::no_std_core::{
@@ -30,7 +30,7 @@ pub use crate::no_std_core::{
 pub use crate::vm_runner::HostedVmTraceRecord;
 
 /// Increment only for a deliberately incompatible hosted-core wire contract.
-pub const HOSTED_ABI_VERSION: u16 = 2;
+pub const HOSTED_ABI_VERSION: u16 = 3;
 
 /// Hard caps for one hosted transaction.  Every cap is fail-closed: a core
 /// tick that exceeds it returns `CapacityExceeded`, and no partial delta is
@@ -78,24 +78,24 @@ pub struct HostedStepInput {
 /// Texture payload retained only for the current transaction.  The host must
 /// validate dimensions, byte count and resource policy before it allocates or
 /// uploads a backend texture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct HostedTextureData {
     pub id: TextureId,
     pub desc: TextureDesc,
-    pub pixels: Option<Vec<u8>>,
+    pub pixels: Option<HostedPixelBuffer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct HostedTextureUpdate {
     pub id: TextureId,
     pub rect: TextureRect,
     pub format: PixelFormat,
-    pub pixels: Vec<u8>,
+    pub pixels: HostedPixelBuffer,
 }
 
 /// Semantic scene operations, preserving upstream renderer data rather than
 /// producing a software-rasterized frame or a product-specific DTO.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum HostedSceneOperation {
     CreateTexture(HostedTextureData),
     UpdateTexture(HostedTextureUpdate),
@@ -215,6 +215,10 @@ pub struct HostedCopyTelemetry {
     pub capture_bytes: u64,
     /// Payload bytes retained by typed hosted operations.
     pub operation_bytes: u64,
+    /// Scene bytes transferred by moving an allocation into hosted capture.
+    pub scene_moved_bytes: u64,
+    /// Scene bytes copied because the renderer received borrowed storage.
+    pub scene_copied_bytes: u64,
     /// PCM bytes transferred by moving their existing allocation.
     pub pcm_moved_bytes: u64,
     /// PCM bytes copied because a caller supplied only a borrowed slice.
@@ -234,7 +238,7 @@ pub enum HostedPhase {
 ///
 /// An embedding may convert this into its own ABI payload, but must not commit
 /// any part of it until all resource, profile and binding checks have passed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct HostedStepDelta {
     pub tick: HostedTickResult,
     pub scene: Vec<HostedSceneOperation>,
@@ -498,6 +502,8 @@ impl HostedSession {
                 operation_bytes: scene_telemetry
                     .operation_bytes
                     .saturating_add(audio_telemetry.operation_bytes),
+                scene_moved_bytes: scene_telemetry.scene_moved_bytes,
+                scene_copied_bytes: scene_telemetry.scene_copied_bytes,
                 pcm_moved_bytes: audio_telemetry.pcm_moved_bytes,
                 pcm_copied_bytes: audio_telemetry.pcm_copied_bytes,
             },
@@ -626,7 +632,7 @@ mod tests {
         let pixels = [1, 2, 3, 4];
 
         renderer
-            .create_texture(TextureId(7), desc, Some(&pixels))
+            .create_texture(TextureId(7), desc, Some(PixelBuffer::Borrowed(&pixels)))
             .expect("the first texture write is accepted");
         assert!(matches!(
             renderer.take_operations().as_slice(),
@@ -634,7 +640,7 @@ mod tests {
         ));
 
         renderer
-            .create_texture(TextureId(7), desc, Some(&pixels))
+            .create_texture(TextureId(7), desc, Some(PixelBuffer::Borrowed(&pixels)))
             .expect("a same-id texture write is an update");
         assert!(matches!(
             renderer.take_operations().as_slice(),
@@ -652,7 +658,13 @@ mod tests {
             mip_count: 1,
         };
         renderer
-            .create_texture(TextureId(9), initial, Some(&[1, 2, 3, 4]))
+            .create_texture(
+                TextureId(9),
+                initial,
+                Some(PixelBuffer::Owned(HostedPixelBuffer::from_bytes(vec![
+                    1, 2, 3, 4,
+                ]))),
+            )
             .expect("initial texture is accepted");
         renderer.take_operations();
 
@@ -663,7 +675,13 @@ mod tests {
             mip_count: 1,
         };
         renderer
-            .create_texture(TextureId(9), replacement, Some(&[1, 2, 3, 4, 5, 6, 7, 8]))
+            .create_texture(
+                TextureId(9),
+                replacement,
+                Some(PixelBuffer::Owned(HostedPixelBuffer::from_bytes(vec![
+                    1, 2, 3, 4, 5, 6, 7, 8,
+                ]))),
+            )
             .expect("shape changes recreate the retained texture generation");
 
         assert!(matches!(
@@ -906,23 +924,40 @@ impl RfvpRenderer for RecordingRenderer {
         &mut self,
         id: TextureId,
         desc: TextureDesc,
-        pixels: Option<&[u8]>,
+        pixels: Option<PixelBuffer<'_>>,
     ) -> RfvpResult<()> {
         self.finish()?;
         validate_texture_desc(desc)?;
         let pixels = pixels
             .map(|pixels| {
-                validate_texture_pixels(desc, pixels.len())?;
-                self.reserve_texture_bytes(pixels.len())?;
+                let byte_len = pixels.len();
+                validate_texture_pixels(desc, byte_len)?;
+                self.reserve_texture_bytes(byte_len)?;
                 self.copy_telemetry.capture_bytes = self
                     .copy_telemetry
                     .capture_bytes
-                    .saturating_add(pixels.len() as u64);
+                    .saturating_add(byte_len as u64);
                 self.copy_telemetry.operation_bytes = self
                     .copy_telemetry
                     .operation_bytes
-                    .saturating_add(pixels.len() as u64);
-                Ok::<Vec<u8>, RfvpError>(pixels.to_vec())
+                    .saturating_add(byte_len as u64);
+                let pixels = match pixels {
+                    PixelBuffer::Borrowed(bytes) => {
+                        self.copy_telemetry.scene_copied_bytes = self
+                            .copy_telemetry
+                            .scene_copied_bytes
+                            .saturating_add(byte_len as u64);
+                        HostedPixelBuffer::from_bytes(bytes.to_vec())
+                    }
+                    PixelBuffer::Owned(bytes) => {
+                        self.copy_telemetry.scene_moved_bytes = self
+                            .copy_telemetry
+                            .scene_moved_bytes
+                            .saturating_add(byte_len as u64);
+                        bytes
+                    }
+                };
+                Ok::<HostedPixelBuffer, RfvpError>(pixels)
             })
             .transpose()?;
         if let Some(index) = self.textures.iter().position(|(known, _)| *known == id) {
@@ -961,7 +996,7 @@ impl RfvpRenderer for RecordingRenderer {
         &mut self,
         id: TextureId,
         rect: TextureRect,
-        pixels: &[u8],
+        pixels: PixelBuffer<'_>,
     ) -> RfvpResult<()> {
         self.finish()?;
         let Some((_, desc)) = self.textures.iter().find(|(known, _)| *known == id) else {
@@ -983,21 +1018,38 @@ impl RfvpRenderer for RecordingRenderer {
         {
             return Err(RfvpError::InvalidArgument);
         }
-        validate_texture_region(desc, rect, pixels.len())?;
-        self.reserve_texture_bytes(pixels.len())?;
+        let byte_len = pixels.len();
+        validate_texture_region(desc, rect, byte_len)?;
+        self.reserve_texture_bytes(byte_len)?;
         self.copy_telemetry.capture_bytes = self
             .copy_telemetry
             .capture_bytes
-            .saturating_add(pixels.len() as u64);
+            .saturating_add(byte_len as u64);
         self.copy_telemetry.operation_bytes = self
             .copy_telemetry
             .operation_bytes
-            .saturating_add(pixels.len() as u64);
+            .saturating_add(byte_len as u64);
+        let pixels = match pixels {
+            PixelBuffer::Borrowed(bytes) => {
+                self.copy_telemetry.scene_copied_bytes = self
+                    .copy_telemetry
+                    .scene_copied_bytes
+                    .saturating_add(byte_len as u64);
+                HostedPixelBuffer::from_bytes(bytes.to_vec())
+            }
+            PixelBuffer::Owned(bytes) => {
+                self.copy_telemetry.scene_moved_bytes = self
+                    .copy_telemetry
+                    .scene_moved_bytes
+                    .saturating_add(byte_len as u64);
+                bytes
+            }
+        };
         self.push(HostedSceneOperation::UpdateTexture(HostedTextureUpdate {
             id,
             rect,
             format: desc.format,
-            pixels: pixels.to_vec(),
+            pixels,
         }))
     }
 
