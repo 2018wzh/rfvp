@@ -123,14 +123,16 @@ impl BgmPlayer {
     pub fn set_volume(&mut self, slot: i32, volume: f32, _tween: Tween) {
         if let Ok(slot) = checked_slot(slot) {
             self.volumes[slot] = volume;
-            self.audio_manager.push_command(AudioCommand::SetParams {
-                id: Self::id(slot),
-                params: AudioParams {
-                    volume: self.effective_volume_for_slot(slot),
-                    pan: self.pan[slot] as f32,
-                    repeat: self.repeat[slot],
-                },
-            });
+            if self.loaded[slot] {
+                self.audio_manager.push_command(AudioCommand::SetParams {
+                    id: Self::id(slot),
+                    params: AudioParams {
+                        volume: self.effective_volume_for_slot(slot),
+                        pan: self.pan[slot] as f32,
+                        repeat: self.repeat[slot],
+                    },
+                });
+            }
         }
     }
 
@@ -143,6 +145,9 @@ impl BgmPlayer {
 
     pub fn stop(&mut self, slot: i32, fade_out: Tween) {
         if let Ok(slot) = checked_slot(slot) {
+            if !self.playing[slot] {
+                return;
+            }
             self.playing[slot] = false;
             self.audio_manager.push_command(AudioCommand::Stop {
                 id: Self::id(slot),
@@ -308,5 +313,19 @@ mod tests {
                 ..
             }] if uri == "audio/theme.ogg" && bytes.is_empty()
         ));
+    }
+
+    #[test]
+    fn empty_slots_do_not_emit_host_commands() {
+        let manager = Arc::new(AudioManager::new());
+        let mut player = BgmPlayer::new(Arc::clone(&manager));
+
+        player.set_volume(0, 0.5, Tween::default());
+        player.silent_on(1, Tween::default());
+        player.stop(2, Tween::default());
+
+        let mut commands = Vec::new();
+        manager.drain_commands(&mut commands);
+        assert!(commands.is_empty());
     }
 }
