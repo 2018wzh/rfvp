@@ -23,5 +23,5 @@ fn vs_main(v: VsIn) -> VsOut {
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
   _ = i;
-  return vec4<f32>(pc.color.rgb * pc.color.a, pc.color.a);
+  return pc.color;
 }

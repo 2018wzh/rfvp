@@ -36,5 +36,5 @@ fn vs_main(v: VsIn) -> VsOut {
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
   let tex = textureSample(t0, s0, i.uv);
-  return vec4<f32>(tex.rgb * i.col.rgb * i.col.a, tex.a * i.col.a);
+  return tex * i.col;
 }
