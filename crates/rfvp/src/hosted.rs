@@ -225,6 +225,30 @@ pub struct HostedCopyTelemetry {
     pub pcm_copied_bytes: u64,
 }
 
+/// Bounded visual transition state exposed only for Evidence runs. It contains
+/// no scene payload and is not part of snapshot or replay state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostedVisualState {
+    pub dissolve_kind: HostedDissolveKind,
+    pub dissolve_color_id: u32,
+    pub dissolve_alpha: f32,
+    pub dissolve2_mode: u8,
+    pub dissolve2_color_id: u32,
+    pub dissolve2_alpha: f32,
+    pub dissolve2_transitioning: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedDissolveKind {
+    None,
+    Static,
+    ColoredFadeIn,
+    ColoredFadeOut,
+    MaskFadeIn,
+    MaskFadeInOut,
+    MaskFadeOut,
+}
+
 /// Phase markers are generic observer hooks.  RFVP never timestamps them;
 /// the embedding is responsible for measuring its own execution environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +272,7 @@ pub struct HostedStepDelta {
     pub logs: Vec<HostedLogRecord>,
     pub log_dropped_count: u32,
     pub copy_telemetry: HostedCopyTelemetry,
+    pub visual_state: Option<HostedVisualState>,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -507,6 +532,7 @@ impl HostedSession {
                 pcm_moved_bytes: audio_telemetry.pcm_moved_bytes,
                 pcm_copied_bytes: audio_telemetry.pcm_copied_bytes,
             },
+            visual_state: self.capture_logs.then(|| self.core.hosted_visual_state()),
         })
     }
 

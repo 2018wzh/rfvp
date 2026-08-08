@@ -351,6 +351,34 @@ impl RfvpCore {
             || self.game_data.get_game_should_exit()
     }
 
+    #[cfg(feature = "hosted")]
+    pub(crate) fn hosted_visual_state(&self) -> crate::hosted::HostedVisualState {
+        use crate::{
+            hosted::{HostedDissolveKind, HostedVisualState},
+            subsystem::resources::motion_manager::DissolveType,
+        };
+
+        let motion = &self.game_data.motion_manager;
+        let dissolve_kind = match motion.get_dissolve_type() {
+            DissolveType::None => HostedDissolveKind::None,
+            DissolveType::Static => HostedDissolveKind::Static,
+            DissolveType::ColoredFadeIn => HostedDissolveKind::ColoredFadeIn,
+            DissolveType::ColoredFadeOut => HostedDissolveKind::ColoredFadeOut,
+            DissolveType::MaskFadeIn => HostedDissolveKind::MaskFadeIn,
+            DissolveType::MaskFadeInOut => HostedDissolveKind::MaskFadeInOut,
+            DissolveType::MaskFadeOut => HostedDissolveKind::MaskFadeOut,
+        };
+        HostedVisualState {
+            dissolve_kind,
+            dissolve_color_id: motion.get_dissolve_color_id(),
+            dissolve_alpha: motion.get_dissolve_alpha(),
+            dissolve2_mode: motion.get_dissolve2_mode(),
+            dissolve2_color_id: motion.get_dissolve2_color_id(),
+            dissolve2_alpha: motion.get_dissolve2_alpha(),
+            dissolve2_transitioning: motion.is_dissolve2_transitioning(),
+        }
+    }
+
     pub fn run_state(&self) -> RfvpCoreRunState {
         self.run_state
     }

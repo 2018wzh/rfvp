@@ -6,9 +6,10 @@ use core_maths::CoreFloat;
 use glam::{vec2, vec3, vec4, Mat4, Vec2, Vec4};
 
 use crate::host_api::{
-    CommandBlendMode, DrawImageCmd, HitProxy, HitProxyTable, HostedPixelBuffer, PixelBuffer,
-    PortableTextureDesc, PrimId, RectI16, RectU16, RenderBackend, RenderCommand, RenderFrame,
-    RfvpError, RfvpResult, Rgba8, TextureBackend, TextureFormat, TextureHandle, Vertex2D,
+    BlendMode, ColorRgba, CommandBlendMode, DrawImageCmd, DrawSolidCommand, HitProxy,
+    HitProxyTable, HostedPixelBuffer, PixelBuffer, PortableTextureDesc, PrimId, RectI16, RectI32,
+    RectU16, RenderBackend, RenderCommand, RenderFrame, RfvpError, RfvpResult, Rgba8,
+    TextureBackend, TextureFormat, TextureHandle, Vertex2D,
 };
 use crate::subsystem::resources::{
     color_manager::ColorManager,
@@ -421,24 +422,31 @@ fn dissolve_color(motion: &MotionManager) -> Option<Vec4> {
 
 fn emit_fullscreen_overlay(
     commands: &mut Vec<RenderCommand>,
-    hit_proxies: &mut HitProxyTable,
+    _hit_proxies: &mut HitProxyTable,
     order: &mut u32,
     virtual_size: (u32, u32),
     color: Vec4,
 ) -> RfvpResult<()> {
-    emit_sprite(
-        commands,
-        hit_proxies,
-        order,
-        -1,
-        Mat4::IDENTITY,
-        virtual_size.0 as f32,
-        virtual_size.1 as f32,
-        vec2(0.5, 0.5),
-        vec2(0.5, 0.5),
-        color,
-        DrawTextureKey::White,
-    )
+    let width = i32::try_from(virtual_size.0).map_err(|_| RfvpError::CapacityExceeded)?;
+    let height = i32::try_from(virtual_size.1).map_err(|_| RfvpError::CapacityExceeded)?;
+    commands.push(RenderCommand::DrawSolid(DrawSolidCommand {
+        rect: RectI32 {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        color: ColorRgba {
+            r: color.x,
+            g: color.y,
+            b: color.z,
+            a: color.w,
+        },
+        blend: BlendMode::Alpha,
+        scissor: None,
+    }));
+    *order = order.checked_add(1).ok_or(RfvpError::CapacityExceeded)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -931,7 +939,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::dissolve_color;
+    use super::{dissolve_color, emit_fullscreen_overlay};
+    use crate::host_api::{HitProxyTable, RenderCommand};
     use crate::subsystem::resources::motion_manager::{DissolveType, MotionManager};
 
     #[test]
@@ -944,6 +953,31 @@ mod tests {
         let color = dissolve_color(&motion).expect("colored dissolve overlay");
         assert_eq!([color.x, color.y, color.z], [0.0, 0.0, 0.0]);
         assert!((color.w - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hosted_white_dissolve_is_a_typed_solid_without_texture_resource() {
+        let mut motion = MotionManager::new();
+        motion.set_dissolve_color_id(2);
+        motion.start_dissolve(100, DissolveType::ColoredFadeOut);
+        motion.tick_dissolve(50);
+
+        let color = dissolve_color(&motion).expect("white colored dissolve overlay");
+        assert_eq!([color.x, color.y, color.z], [1.0, 1.0, 1.0]);
+        let mut commands = Vec::new();
+        let mut hit_proxies = HitProxyTable::default();
+        let mut order = 0;
+        emit_fullscreen_overlay(
+            &mut commands,
+            &mut hit_proxies,
+            &mut order,
+            (1024, 768),
+            color,
+        )
+        .expect("bounded full-screen overlay");
+        assert!(matches!(commands.as_slice(), [RenderCommand::DrawSolid(_)]));
+        assert_eq!(order, 1);
+        assert!(hit_proxies.proxies.is_empty());
     }
 
     #[test]

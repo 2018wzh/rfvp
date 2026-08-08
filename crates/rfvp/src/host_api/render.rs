@@ -288,6 +288,7 @@ pub struct DrawGlyphCmd {
 pub enum RenderCommand {
     DrawImage(DrawImageCmd),
     DrawGlyph(DrawGlyphCmd),
+    DrawSolid(DrawSolidCommand),
     SetClip(RectI16),
     ClearClip,
 }
@@ -496,6 +497,11 @@ impl<T: RfvpRenderer> RenderBackend for T {
                             scissor,
                         },
                     )?;
+                }
+                RenderCommand::DrawSolid(cmd) => {
+                    let mut cmd = cmd;
+                    cmd.scissor = cmd.scissor.or(clip.map(command_rect_to_host));
+                    RfvpRenderer::draw_solid(self, &cmd)?;
                 }
             }
         }
