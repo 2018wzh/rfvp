@@ -226,8 +226,6 @@ pub struct HostedCoreSnapshot {
     pub version: u16,
     pub frame_index: u64,
     pub last_tick_us: Option<u64>,
-    pub last_dissolve_transitioning: bool,
-    pub last_dissolve2_transitioning: bool,
     pub quit_requested: bool,
     pub save_state: SaveStateSnapshotV1,
     pub globals: crate::script::global::HostedGlobalSnapshot,
@@ -252,8 +250,6 @@ struct HostedCanonicalStateV1 {
     version: u16,
     frame_index: u64,
     last_tick_us: Option<u64>,
-    last_dissolve_transitioning: bool,
-    last_dissolve2_transitioning: bool,
     quit_requested: bool,
     globals: crate::script::global::HostedGlobalSnapshot,
     input: InputManagerSnapshotV1,
@@ -297,8 +293,6 @@ pub struct RfvpCore {
     pending_events: Vec<RfvpEvent>,
     frame_index: u64,
     last_tick_us: Option<u64>,
-    last_dissolve_transitioning: bool,
-    last_dissolve2_transitioning: bool,
     quit_requested: bool,
     run_state: RfvpCoreRunState,
     loaded_game: Option<RfvpLoadedGame>,
@@ -320,8 +314,6 @@ impl RfvpCore {
             pending_events: Vec::new(),
             frame_index: 0,
             last_tick_us: None,
-            last_dissolve_transitioning: false,
-            last_dissolve2_transitioning: false,
             quit_requested: false,
             run_state: RfvpCoreRunState::NotBooted,
             loaded_game: None,
@@ -471,8 +463,6 @@ impl RfvpCore {
             version: HOSTED_CORE_SNAPSHOT_VERSION,
             frame_index: self.frame_index,
             last_tick_us: self.last_tick_us,
-            last_dissolve_transitioning: self.last_dissolve_transitioning,
-            last_dissolve2_transitioning: self.last_dissolve2_transitioning,
             quit_requested: self.quit_requested,
             save_state: SaveStateSnapshotV1::capture_hosted(
                 &self.game_data,
@@ -520,8 +510,6 @@ impl RfvpCore {
         snapshot.global_state.apply(&mut self.game_data);
         self.frame_index = snapshot.frame_index;
         self.last_tick_us = snapshot.last_tick_us;
-        self.last_dissolve_transitioning = snapshot.last_dissolve_transitioning;
-        self.last_dissolve2_transitioning = snapshot.last_dissolve2_transitioning;
         self.quit_requested = snapshot.quit_requested;
         self.last_error = None;
         self.last_error_detail = None;
@@ -551,8 +539,6 @@ impl RfvpCore {
                 state.version,
                 state.frame_index,
                 state.last_tick_us,
-                state.last_dissolve_transitioning,
-                state.last_dissolve2_transitioning,
                 state.quit_requested,
             ))?,
             globals: hosted_component_hash(&state.globals)?,
@@ -579,8 +565,6 @@ impl RfvpCore {
             version: 1,
             frame_index: self.frame_index,
             last_tick_us: self.last_tick_us,
-            last_dissolve_transitioning: self.last_dissolve_transitioning,
-            last_dissolve2_transitioning: self.last_dissolve2_transitioning,
             quit_requested: self.quit_requested,
             globals: self.game_data.capture_hosted_globals(),
             input: self.game_data.inputs_manager.capture_snapshot_v1(),
@@ -879,27 +863,6 @@ impl RfvpCore {
         }
         host.audio().tick(elapsed_us)?;
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
-            let dissolve_type = self.game_data.motion_manager.get_dissolve_type();
-            let dissolve_transitioning = !matches!(
-                dissolve_type,
-                crate::subsystem::resources::motion_manager::DissolveType::None
-                    | crate::subsystem::resources::motion_manager::DissolveType::Static
-            );
-            let dissolve2_transitioning =
-                self.game_data.motion_manager.is_dissolve2_transitioning();
-            let dissolve_completed = (self.last_dissolve_transitioning && !dissolve_transitioning)
-                || (self.last_dissolve2_transitioning && !dissolve2_transitioning);
-            self.last_dissolve_transitioning = dissolve_transitioning;
-            self.last_dissolve2_transitioning = dissolve2_transitioning;
-            if dissolve_completed {
-                if let Err(err) = vm_runner.tick(&mut self.game_data, parser, 0) {
-                    let message = err.to_string();
-                    host.log(RfvpLogLevel::Error, &message);
-                    self.last_error = Some(RfvpError::Unsupported);
-                    self.last_error_detail = Some(message);
-                    return Err(RfvpError::Unsupported);
-                }
-            }
             if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
                 let message = err.to_string();
                 host.log(RfvpLogLevel::Error, &message);
