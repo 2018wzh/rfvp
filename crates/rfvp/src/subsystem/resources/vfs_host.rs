@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -8,8 +8,8 @@ use core::mem::size_of;
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::script::parser::Nls;
 use crate::host_api::RfvpFile;
+use crate::script::parser::Nls;
 use crate::utils::stable_hash::StableHashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -52,7 +52,10 @@ impl HostedPackReader {
                 })?;
                 let length = file.len().map_err(Self::io_error)?;
                 length.checked_sub(self.base).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "host pack base exceeds file length")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "host pack base exceeds file length",
+                    )
                 })
             }
         }
@@ -74,7 +77,9 @@ impl Read for HostedPackReader {
         let mut file = self.file.try_borrow_mut().map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::Other, "host pack is already borrowed")
         })?;
-        let read = file.read_at(offset, &mut buffer[..request]).map_err(Self::io_error)?;
+        let read = file
+            .read_at(offset, &mut buffer[..request])
+            .map_err(Self::io_error)?;
         if read > request {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -82,7 +87,10 @@ impl Read for HostedPackReader {
             ));
         }
         self.position = self.position.checked_add(read as u64).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "host pack position overflow")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "host pack position overflow",
+            )
         })?;
         Ok(read)
     }
@@ -121,10 +129,7 @@ enum PackSource {
 impl core::fmt::Debug for PackSource {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Bytes(bytes) => formatter
-                .debug_tuple("Bytes")
-                .field(&bytes.len())
-                .finish(),
+            Self::Bytes(bytes) => formatter.debug_tuple("Bytes").field(&bytes.len()).finish(),
             Self::Hosted(_) => formatter.write_str("Hosted(range-read)"),
         }
     }
@@ -161,11 +166,7 @@ impl VfsFile {
     /// Parse only pack metadata from a host-owned range-readable file.  Pack
     /// bodies are never copied into RFVP memory; each entry is served by a
     /// bounded subrange reader when an engine subsystem actually opens it.
-    pub fn from_host_file(
-        folder_name: String,
-        file: Box<dyn RfvpFile>,
-        nls: Nls,
-    ) -> Result<Self> {
+    pub fn from_host_file(folder_name: String, file: Box<dyn RfvpFile>, nls: Nls) -> Result<Self> {
         let source = Rc::new(RefCell::new(file));
         let mut reader = HostedPackReader::new(source.clone(), 0, None);
         let (file_count, filename_table_size, entries) = Self::parse_reader(&mut reader, nls)?;
@@ -256,13 +257,19 @@ impl VfsFile {
             cur += 4;
 
             if let Some(name) = filename_table.get(&name_off) {
-                entries.insert(
-                    name.clone(),
-                    VfsEntry {
-                        offset: data_off,
-                        size: data_size,
-                    },
-                );
+                let name = name.to_ascii_lowercase();
+                if entries
+                    .insert(
+                        name.clone(),
+                        VfsEntry {
+                            offset: data_off,
+                            size: data_size,
+                        },
+                    )
+                    .is_some()
+                {
+                    bail!("duplicate case-folded host pack entry: {name}");
+                }
             }
         }
 
@@ -270,11 +277,12 @@ impl VfsFile {
     }
 
     pub fn add_override(&mut self, name: &str, bytes: Vec<u8>) {
-        self.overrides.insert(name.to_string(), bytes);
+        self.overrides.insert(name.to_ascii_lowercase(), bytes);
     }
 
     pub fn open_stream_with_len(&self, name: &str) -> Result<(VfsStream, Option<u64>)> {
-        if let Some(bytes) = self.overrides.get(name) {
+        let name = name.to_ascii_lowercase();
+        if let Some(bytes) = self.overrides.get(&name) {
             return Ok((
                 Box::new(Cursor::new(bytes.clone())),
                 Some(bytes.len() as u64),
@@ -283,12 +291,14 @@ impl VfsFile {
 
         let ent = self
             .entries
-            .get(name)
+            .get(&name)
             .ok_or_else(|| anyhow!("file not found in host pack {}: {}", self.folder_name, name))?;
         match &self.source {
             PackSource::Bytes(pack_bytes) => {
-                let start = usize::try_from(ent.offset).map_err(|_| anyhow!("pack offset too large"))?;
-                let size = usize::try_from(ent.size).map_err(|_| anyhow!("pack entry too large"))?;
+                let start =
+                    usize::try_from(ent.offset).map_err(|_| anyhow!("pack offset too large"))?;
+                let size =
+                    usize::try_from(ent.size).map_err(|_| anyhow!("pack entry too large"))?;
                 let end = start
                     .checked_add(size)
                     .ok_or_else(|| anyhow!("pack entry overflow"))?;
@@ -302,10 +312,17 @@ impl VfsFile {
                         pack_bytes.len()
                     );
                 }
-                Ok((Box::new(Cursor::new(pack_bytes[start..end].to_vec())), Some(ent.size)))
+                Ok((
+                    Box::new(Cursor::new(pack_bytes[start..end].to_vec())),
+                    Some(ent.size),
+                ))
             }
             PackSource::Hosted(file) => Ok((
-                Box::new(HostedPackReader::new(file.clone(), ent.offset, Some(ent.size))),
+                Box::new(HostedPackReader::new(
+                    file.clone(),
+                    ent.offset,
+                    Some(ent.size),
+                )),
                 Some(ent.size),
             )),
         }
@@ -323,7 +340,7 @@ impl VfsFile {
     }
 
     pub fn save(&mut self, name: &str, content: Vec<u8>) -> Result<()> {
-        self.overrides.insert(name.to_string(), content);
+        self.overrides.insert(name.to_ascii_lowercase(), content);
         Ok(())
     }
 }
@@ -437,4 +454,60 @@ fn normalize_vfs_key(path: &str) -> String {
         .replace('\\', "/")
         .trim_start_matches('/')
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut name_offsets = Vec::new();
+        for (name, _) in entries {
+            name_offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let data_offset = 8 + entries.len() * 12 + names.len();
+        let mut next_data_offset = data_offset as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        for ((_, data), name_offset) in entries.iter().zip(name_offsets) {
+            bytes.extend_from_slice(&name_offset.to_le_bytes());
+            bytes.extend_from_slice(&next_data_offset.to_le_bytes());
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            next_data_offset += data.len() as u32;
+        }
+        bytes.extend_from_slice(&names);
+        for (_, data) in entries {
+            bytes.extend_from_slice(data);
+        }
+        bytes
+    }
+
+    #[test]
+    fn hosted_pack_lookup_is_ascii_case_insensitive() {
+        let mut vfs = Vfs::new(Nls::UTF8).expect("create hosted VFS");
+        vfs.add_pack_bytes("graph.bin", pack(&[("title_bg1_A", b"pixels")]))
+            .expect("parse hosted pack");
+        assert_eq!(
+            vfs.read_file("GRAPH/TITLE_BG1_a")
+                .expect("read mixed-case path"),
+            b"pixels"
+        );
+    }
+
+    #[test]
+    fn hosted_pack_rejects_case_folded_duplicates() {
+        let error = VfsFile::from_pack_bytes(
+            "graph".into(),
+            pack(&[("Title", b"a"), ("title", b"b")]),
+            Nls::UTF8,
+        )
+        .expect_err("case-folded duplicate must fail");
+        assert!(error
+            .to_string()
+            .contains("duplicate case-folded host pack entry"));
+    }
 }
