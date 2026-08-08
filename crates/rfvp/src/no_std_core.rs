@@ -10,10 +10,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "hosted")]
 use std::io::Read;
 
+#[cfg(feature = "old_school")]
 use crate::font::Font;
+#[cfg(feature = "old_school")]
+use crate::host_api::{FatalErrorCode, PlatformCallbacks};
 use crate::host_api::{
-    FatalErrorCode, HitProxyTable, PlatformCallbacks, RfvpAudio, RfvpClock, RfvpError, RfvpEvent,
-    RfvpFile, RfvpFileInfo, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpResult,
+    HitProxyTable, RfvpAudio, RfvpClock, RfvpError, RfvpEvent, RfvpFile, RfvpFileInfo,
+    RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpResult,
 };
 use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache};
 #[cfg(not(feature = "hosted"))]
@@ -42,10 +45,6 @@ use crate::vm_runner::VmRunner;
 #[cfg(feature = "old_school")]
 use core_maths::CoreFloat;
 
-const MISSING_DEFAULT_FONT_MESSAGE: &str =
-    "Required font file default.ttf was not found in the game directory.";
-const INVALID_DEFAULT_FONT_MESSAGE: &str =
-    "Required font file default.ttf exists but is not a valid TrueType/OpenType font.";
 #[cfg(feature = "old_school")]
 const MISSING_OLD_SCHOOL_FONT_MESSAGE: &str =
     "Required font file defualt.tmap was not found in the game directory.";
@@ -733,6 +732,7 @@ impl RfvpCore {
             self.last_error_detail = Some(detail);
             err
         })?;
+        #[cfg(feature = "old_school")]
         let default_font = load_required_default_font(host).map_err(|(err, detail)| {
             self.last_error_detail = Some(detail);
             err
@@ -762,7 +762,14 @@ impl RfvpCore {
         );
         #[cfg(feature = "old_school")]
         game_data.set_old_school_scale(old_school_scale);
-        game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        #[cfg(feature = "old_school")]
+        {
+            game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        }
+        #[cfg(not(feature = "old_school"))]
+        {
+            game_data.fontface_manager = FontEnumerator::new();
+        }
         game_data.vfs = vfs;
         game_data.nls = boot.nls;
         game_data.set_window(Window::new(screen, 1.0));
@@ -1003,76 +1010,42 @@ impl RfvpCore {
     }
 }
 
+#[cfg(feature = "old_school")]
 fn load_required_default_font<H: RfvpHost>(host: &mut H) -> Result<Font, (RfvpError, String)> {
     let callbacks = host.platform_callbacks();
     let mut bytes = Vec::new();
-    #[cfg(feature = "old_school")]
+    if host
+        .fs()
+        .read_required_file("defualt.tmap", &mut bytes)
+        .is_err()
     {
-        if host
-            .fs()
-            .read_required_file("defualt.tmap", &mut bytes)
-            .is_err()
-        {
-            notify_fatal(
-                callbacks,
-                FatalErrorCode::MissingDefaultFont,
-                MISSING_OLD_SCHOOL_FONT_MESSAGE,
-            );
-            return Err((
-                RfvpError::NotFound,
-                MISSING_OLD_SCHOOL_FONT_MESSAGE.to_string(),
-            ));
-        }
-        match Font::from_old_school_tmap(bytes) {
-            Ok(font) => Ok(font),
-            Err(_) => {
-                notify_fatal(
-                    callbacks,
-                    FatalErrorCode::InvalidDefaultFont,
-                    INVALID_OLD_SCHOOL_FONT_MESSAGE,
-                );
-                Err((
-                    RfvpError::InvalidData,
-                    INVALID_OLD_SCHOOL_FONT_MESSAGE.to_string(),
-                ))
-            }
-        }
+        notify_fatal(
+            callbacks,
+            FatalErrorCode::MissingDefaultFont,
+            MISSING_OLD_SCHOOL_FONT_MESSAGE,
+        );
+        return Err((
+            RfvpError::NotFound,
+            MISSING_OLD_SCHOOL_FONT_MESSAGE.to_string(),
+        ));
     }
-
-    #[cfg(not(feature = "old_school"))]
-    {
-        if host
-            .fs()
-            .read_required_file("default.ttf", &mut bytes)
-            .is_err()
-        {
+    match Font::from_old_school_tmap(bytes) {
+        Ok(font) => Ok(font),
+        Err(_) => {
             notify_fatal(
                 callbacks,
-                FatalErrorCode::MissingDefaultFont,
-                MISSING_DEFAULT_FONT_MESSAGE,
+                FatalErrorCode::InvalidDefaultFont,
+                INVALID_OLD_SCHOOL_FONT_MESSAGE,
             );
-            return Err((
-                RfvpError::NotFound,
-                MISSING_DEFAULT_FONT_MESSAGE.to_string(),
-            ));
-        }
-        match Font::from_vec(bytes) {
-            Ok(font) => Ok(font),
-            Err(_) => {
-                notify_fatal(
-                    callbacks,
-                    FatalErrorCode::InvalidDefaultFont,
-                    INVALID_DEFAULT_FONT_MESSAGE,
-                );
-                Err((
-                    RfvpError::InvalidData,
-                    INVALID_DEFAULT_FONT_MESSAGE.to_string(),
-                ))
-            }
+            Err((
+                RfvpError::InvalidData,
+                INVALID_OLD_SCHOOL_FONT_MESSAGE.to_string(),
+            ))
         }
     }
 }
 
+#[cfg(feature = "old_school")]
 fn notify_fatal(callbacks: PlatformCallbacks, code: FatalErrorCode, message: &str) {
     if let Some(callback) = callbacks.fatal_error {
         callback(callbacks.user_data, code, message.as_ptr(), message.len());
