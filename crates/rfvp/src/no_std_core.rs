@@ -107,8 +107,8 @@ fn hosted_keycode(
 
 #[cfg(test)]
 mod hosted_input_tests {
-    use super::hosted_keycode;
-    use crate::host_api::KeyCode as HostKeyCode;
+    use super::{hosted_keycode, RfvpCore, RfvpCoreConfig};
+    use crate::host_api::{InputModifiers, KeyCode as HostKeyCode, RfvpEvent};
     use crate::subsystem::resources::input_manager::KeyCode as InputKeyCode;
 
     #[test]
@@ -131,6 +131,23 @@ mod hosted_input_tests {
     fn rejects_hosted_keys_without_an_fvp_input_bit() {
         assert_eq!(hosted_keycode(HostKeyCode::Character('x')), None);
         assert_eq!(hosted_keycode(HostKeyCode::Function(13)), None);
+    }
+
+    #[test]
+    fn hosted_event_is_latched_exactly_once_before_vm() {
+        let mut core = RfvpCore::new(RfvpCoreConfig::default());
+        core.push_event(RfvpEvent::KeyDown {
+            key: HostKeyCode::Return,
+            repeat: false,
+            modifiers: InputModifiers::empty(),
+        })
+        .unwrap();
+
+        core.apply_pending_events_to_game_data();
+        assert_eq!(core.game_data.inputs_manager.get_input_down(), 0);
+
+        core.game_data.inputs_manager.begin_frame();
+        assert_ne!(core.game_data.inputs_manager.get_input_down(), 0);
     }
 }
 
@@ -899,7 +916,6 @@ impl RfvpCore {
                 _ => {}
             }
         }
-        self.game_data.inputs_manager.begin_frame();
     }
 
     fn flush_audio<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
