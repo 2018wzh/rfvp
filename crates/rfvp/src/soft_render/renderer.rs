@@ -628,11 +628,7 @@ impl SoftRenderer {
         // The original engine's draw_color_tile() uses only the accumulated
         // parent position plus the tile's X/Y and W/H. Tile primitives do not
         // apply rotation, scale, pivot, or V3D.
-        let model = Mat4::from_translation(vec3(
-            parent_x + draw_x,
-            parent_y + draw_y,
-            0.0,
-        ));
+        let model = Mat4::from_translation(vec3(parent_x + draw_x, parent_y + draw_y, 0.0));
         let _ = self.draw_textured_quad(
             model,
             w,
@@ -793,7 +789,13 @@ impl SoftRenderer {
                 }
                 let uv = a.uv * w0 + b.uv * w1 + c.uv * w2;
                 let color = a.color * w0 + b.color * w1 + c.color * w2;
-                let src = self.sample_texture(texture, uv) * color;
+                let texel = self.sample_texture(texture, uv);
+                let src = vec4(
+                    texel.x * color.x * color.w,
+                    texel.y * color.y * color.w,
+                    texel.z * color.z * color.w,
+                    texel.w * color.w,
+                );
                 self.blend_pixel(x as u32, y as u32, src);
             }
         }
@@ -846,13 +848,7 @@ impl SoftRenderer {
                 pixels[off + 3] as f32 / 255.0,
             ),
         };
-        let inv = 1.0 - src_a;
-        let out = vec4(
-            src.x.clamp(0.0, 1.0) * src_a + dr * inv,
-            src.y.clamp(0.0, 1.0) * src_a + dg * inv,
-            src.z.clamp(0.0, 1.0) * src_a + db * inv,
-            src_a + da * inv,
-        );
+        let out = premultiplied_over(src, vec4(dr, dg, db, da));
         let r = (out.x.clamp(0.0, 1.0) * 255.0).round() as u8;
         let g = (out.y.clamp(0.0, 1.0) * 255.0).round() as u8;
         let b = (out.z.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -862,6 +858,17 @@ impl SoftRenderer {
             PixelFormat::Bgra8 => pixels[off..off + 4].copy_from_slice(&[b, g, r, a]),
         }
     }
+}
+
+fn premultiplied_over(src: Vec4, dst: Vec4) -> Vec4 {
+    let src_a = src.w.clamp(0.0, 1.0);
+    let inv = 1.0 - src_a;
+    vec4(
+        src.x.clamp(0.0, 1.0) + dst.x * inv,
+        src.y.clamp(0.0, 1.0) + dst.y * inv,
+        src.z.clamp(0.0, 1.0) + dst.z * inv,
+        src_a + dst.w * inv,
+    )
 }
 
 fn edge(a: Vec2, b: Vec2, p: Vec2) -> f32 {
@@ -907,4 +914,17 @@ fn rgba_to_vec4(px: [u8; 4]) -> Vec4 {
         px[2] as f32 / 255.0,
         px[3] as f32 / 255.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::premultiplied_over;
+    use glam::vec4;
+
+    #[test]
+    fn premultiplied_source_is_not_multiplied_by_alpha_twice() {
+        let output = premultiplied_over(vec4(0.4, 0.2, 0.1, 0.5), vec4(0.2, 0.4, 0.6, 1.0));
+        let expected = vec4(0.5, 0.4, 0.4, 1.0);
+        assert!((output - expected).abs().max_element() < f32::EPSILON);
+    }
 }
