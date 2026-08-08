@@ -836,22 +836,22 @@ impl SoftRenderer {
         let pixels = self.framebuffer.pixels_mut();
         let (dr, dg, db, da) = match format {
             PixelFormat::Rgba8 => (
-                pixels[off] as f32 / 255.0,
-                pixels[off + 1] as f32 / 255.0,
-                pixels[off + 2] as f32 / 255.0,
+                srgb_to_linear(pixels[off]),
+                srgb_to_linear(pixels[off + 1]),
+                srgb_to_linear(pixels[off + 2]),
                 pixels[off + 3] as f32 / 255.0,
             ),
             PixelFormat::Bgra8 => (
-                pixels[off + 2] as f32 / 255.0,
-                pixels[off + 1] as f32 / 255.0,
-                pixels[off] as f32 / 255.0,
+                srgb_to_linear(pixels[off + 2]),
+                srgb_to_linear(pixels[off + 1]),
+                srgb_to_linear(pixels[off]),
                 pixels[off + 3] as f32 / 255.0,
             ),
         };
         let out = premultiplied_over(src, vec4(dr, dg, db, da));
-        let r = (out.x.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let g = (out.y.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let b = (out.z.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let r = linear_to_srgb(out.x);
+        let g = linear_to_srgb(out.y);
+        let b = linear_to_srgb(out.z);
         let a = (out.w.clamp(0.0, 1.0) * 255.0).round() as u8;
         match format {
             PixelFormat::Rgba8 => pixels[off..off + 4].copy_from_slice(&[r, g, b, a]),
@@ -909,16 +909,35 @@ fn sample_linear(image: &DynamicImage, uv: Vec2) -> Vec4 {
 
 fn rgba_to_vec4(px: [u8; 4]) -> Vec4 {
     vec4(
-        px[0] as f32 / 255.0,
-        px[1] as f32 / 255.0,
-        px[2] as f32 / 255.0,
+        srgb_to_linear(px[0]),
+        srgb_to_linear(px[1]),
+        srgb_to_linear(px[2]),
         px[3] as f32 / 255.0,
     )
 }
 
+fn srgb_to_linear(value: u8) -> f32 {
+    let encoded = value as f32 / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let linear = value.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
-    use super::premultiplied_over;
+    use super::{linear_to_srgb, premultiplied_over, rgba_to_vec4, srgb_to_linear};
     use glam::vec4;
 
     #[test]
@@ -926,5 +945,21 @@ mod tests {
         let output = premultiplied_over(vec4(0.4, 0.2, 0.1, 0.5), vec4(0.2, 0.4, 0.6, 1.0));
         let expected = vec4(0.5, 0.4, 0.4, 1.0);
         assert!((output - expected).abs().max_element() < f32::EPSILON);
+    }
+
+    #[test]
+    fn software_texture_sampling_matches_srgb_gpu_decode() {
+        let decoded = rgba_to_vec4([128, 64, 32, 128]);
+        assert!((decoded.x - 0.215_860_5).abs() < 1.0e-6);
+        assert!((decoded.y - 0.051_269_46).abs() < 1.0e-6);
+        assert!((decoded.z - 0.014_443_844).abs() < 1.0e-6);
+        assert!((decoded.w - 128.0 / 255.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn srgb_round_trip_is_byte_exact() {
+        for encoded in 0..=u8::MAX {
+            assert_eq!(linear_to_srgb(srgb_to_linear(encoded)), encoded);
+        }
     }
 }
