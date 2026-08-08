@@ -790,6 +790,25 @@ impl RfvpCore {
         self.game_data
             .timer_manager
             .tick(frame_time_ms.min(u64::from(u32::MAX)) as u32);
+        self.game_data.inputs_manager.begin_frame();
+        let video_tick_error = {
+            let (video_manager, motion_manager) = (
+                &mut self.game_data.video_manager,
+                &mut self.game_data.motion_manager,
+            );
+            video_manager.tick(motion_manager).err()
+        };
+        if let Some(error) = video_tick_error {
+            let message = error.to_string();
+            host.log(RfvpLogLevel::Error, &message);
+            self.last_error = Some(RfvpError::Unsupported);
+            self.last_error_detail = Some(message);
+            return Err(RfvpError::Unsupported);
+        }
+        self.game_data.set_current_thread(0);
+        if self.game_data.get_halt() {
+            self.game_data.set_halt(false);
+        }
         host.audio().tick(elapsed_us)?;
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
             if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
@@ -803,6 +822,7 @@ impl RfvpCore {
             // The original engine advances scripts before text and motion updates.
             let mut scene = AnzuScene::new();
             scene.update_after_vm(&mut self.game_data, frame_time_ms);
+            self.game_data.set_current_thread(0);
 
             self.flush_audio(host)?;
             self.render_game_frame(host)?;
