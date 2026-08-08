@@ -749,6 +749,10 @@ impl RfvpCore {
         self.game_data = game_data;
         self.vm_runner = Some(vm_runner);
         self.parser = Some(parser);
+        // Bind the first hosted frame to elapsed host time since boot. Leaving
+        // this unset makes the first tick consume a zero delta and permanently
+        // shifts script timers and motion state by one presentation.
+        self.last_tick_us = Some(host.clock().ticks_us());
         Ok(())
     }
 
@@ -773,9 +777,21 @@ impl RfvpCore {
         }
 
         crate::platform_time::set_host_time_us(now);
+        self.game_data
+            .time_mut_ref()
+            .set_external_delta(crate::platform_time::Duration::from_micros(elapsed_us));
+        let frame_duration = self.game_data.time_mut_ref().frame();
+        let frame_us = frame_duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        let frame_time_ms = if frame_us == 0 {
+            0
+        } else {
+            (frame_us + 999) / 1_000
+        };
+        self.game_data
+            .timer_manager
+            .tick(frame_time_ms.min(u64::from(u32::MAX)) as u32);
         host.audio().tick(elapsed_us)?;
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
-            let frame_time_ms = elapsed_us / 1_000;
             if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
                 let message = err.to_string();
                 host.log(RfvpLogLevel::Error, &message);
@@ -790,6 +806,7 @@ impl RfvpCore {
 
             self.flush_audio(host)?;
             self.render_game_frame(host)?;
+            self.game_data.inputs_manager.frame_reset();
         } else if self.run_state == RfvpCoreRunState::BootFailed {
             return Err(self.last_error.unwrap_or(RfvpError::InvalidData));
         }
