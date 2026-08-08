@@ -13,7 +13,7 @@ use crate::host_api::{
 use crate::subsystem::resources::{
     color_manager::ColorManager,
     graph_buff::GraphBuff,
-    motion_manager::{snow::SnowMotion, MotionManager},
+    motion_manager::{snow::SnowMotion, DissolveType, MotionManager},
     prim::{Prim, PrimManager, PrimType},
 };
 
@@ -336,6 +336,35 @@ where
         0,
     )?;
 
+    if let Some(color) = dissolve_color(motion) {
+        emit_fullscreen_overlay(
+            &mut frame.commands,
+            &mut frame.hit_proxies,
+            &mut order,
+            virtual_size,
+            color,
+        )?;
+    }
+
+    let dissolve2_alpha = motion.get_dissolve2_alpha();
+    if dissolve2_alpha > 0.0 {
+        let color = motion
+            .color_manager
+            .get_entry(motion.get_dissolve2_color_id() as u8);
+        emit_fullscreen_overlay(
+            &mut frame.commands,
+            &mut frame.hit_proxies,
+            &mut order,
+            virtual_size,
+            vec4(
+                color.get_r() as f32 / 255.0,
+                color.get_g() as f32 / 255.0,
+                color.get_b() as f32 / 255.0,
+                (color.get_a() as f32 / 255.0) * dissolve2_alpha,
+            ),
+        )?;
+    }
+
     let root = prim_manager.get_custom_root_prim_id() as i16;
     if root != 0 {
         let mut visit = vec![0u8; 4096];
@@ -364,6 +393,52 @@ where
     backend.submit_commands(&frame.commands)?;
     backend.end_frame()?;
     Ok(frame)
+}
+
+fn dissolve_color(motion: &MotionManager) -> Option<Vec4> {
+    match motion.get_dissolve_type() {
+        DissolveType::None
+        | DissolveType::MaskFadeIn
+        | DissolveType::MaskFadeInOut
+        | DissolveType::MaskFadeOut => None,
+        DissolveType::Static | DissolveType::ColoredFadeIn | DissolveType::ColoredFadeOut => {
+            let alpha = motion.get_dissolve_alpha();
+            if alpha <= 0.0 {
+                return None;
+            }
+            let color = motion
+                .color_manager
+                .get_entry(motion.get_dissolve_color_id() as u8);
+            Some(vec4(
+                color.get_r() as f32 / 255.0,
+                color.get_g() as f32 / 255.0,
+                color.get_b() as f32 / 255.0,
+                (color.get_a() as f32 / 255.0) * alpha,
+            ))
+        }
+    }
+}
+
+fn emit_fullscreen_overlay(
+    commands: &mut Vec<RenderCommand>,
+    hit_proxies: &mut HitProxyTable,
+    order: &mut u32,
+    virtual_size: (u32, u32),
+    color: Vec4,
+) -> RfvpResult<()> {
+    emit_sprite(
+        commands,
+        hit_proxies,
+        order,
+        -1,
+        Mat4::IDENTITY,
+        virtual_size.0 as f32,
+        virtual_size.1 as f32,
+        vec2(0.5, 0.5),
+        vec2(0.5, 0.5),
+        color,
+        DrawTextureKey::White,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -852,4 +927,31 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dissolve_color;
+    use crate::subsystem::resources::motion_manager::{DissolveType, MotionManager};
+
+    #[test]
+    fn hosted_colored_dissolve_uses_motion_color_and_alpha() {
+        let mut motion = MotionManager::new();
+        motion.set_dissolve_color_id(1);
+        motion.start_dissolve(100, DissolveType::ColoredFadeOut);
+        motion.tick_dissolve(50);
+
+        let color = dissolve_color(&motion).expect("colored dissolve overlay");
+        assert_eq!([color.x, color.y, color.z], [0.0, 0.0, 0.0]);
+        assert!((color.w - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hosted_mask_dissolve_does_not_become_a_solid_overlay() {
+        let mut motion = MotionManager::new();
+        motion.start_dissolve(100, DissolveType::MaskFadeOut);
+        motion.tick_dissolve(50);
+
+        assert!(dissolve_color(&motion).is_none());
+    }
 }
