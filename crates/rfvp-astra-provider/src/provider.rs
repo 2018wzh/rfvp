@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
     time::Instant,
 };
@@ -8,7 +8,7 @@ use std::{
 use astra_byte_source::OwnedByteBuffer;
 use astra_core::Hash256;
 use astra_emu_extension_api::{
-    TranslationTextRequestV1, TranslationTextResponseV1, TRANSLATION_TEXT_HOOK_ID,
+    TRANSLATION_TEXT_HOOK_ID, TranslationTextRequestV1, TranslationTextResponseV1,
 };
 use astra_emu_family_api::*;
 use rfvp_hosted::{
@@ -18,9 +18,9 @@ use rfvp_hosted::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    FVP_FAMILY_ID, FVP_PROVIDER_ID, FvpHcbScript, FvpNls,
     hosted::{audio_commands_from_delta, video_commands_from_delta},
     hosted_runtime::HostedFvpSession,
-    FvpHcbScript, FvpNls, FVP_FAMILY_ID, FVP_PROVIDER_ID,
 };
 
 const MAX_CASE_FILES: usize = 65_536;
@@ -437,12 +437,6 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
                 "ASTRA_FVP_STEP_IDENTITY",
                 "step seed or delta drifted",
             ));
-        }
-        if !matches!(
-            input.mode,
-            LegacyReplayMode::Live | LegacyReplayMode::RestoreContinuation
-        ) {
-            return Err(invalid("ASTRA_FVP_STEP_MODE", "unsupported step mode"));
         }
         let hosted_input = HostedStepInput {
             events: hosted_inputs(session, &input.input_edges)?,
@@ -975,13 +969,13 @@ fn hosted_inputs(
                         return Err(invalid(
                             "ASTRA_FVP_INPUT_KEY",
                             format!("canonical input key is not supported by RFVP: {other:?}"),
-                        ))
+                        ));
                     }
                     None => {
                         return Err(invalid(
                             "ASTRA_FVP_INPUT_KEY",
                             format!("unsupported canonical input key {control}"),
-                        ))
+                        ));
                     }
                 };
                 events.push(if edge.pressed {
