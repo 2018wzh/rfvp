@@ -13,7 +13,7 @@ use astra_emu_extension_api::{
 use astra_emu_family_api::*;
 use rfvp_hosted::{
     host_api::{InputModifiers, KeyCode, PointerButton, RfvpEvent, RfvpLogLevel},
-    hosted::{HostedLogRecord, HostedStepInput, HostedTraceProfile},
+    hosted::{HostedLogRecord, HostedStepInput, HostedTraceProfile, HostedVisualDamage},
 };
 use serde::{Deserialize, Serialize};
 
@@ -479,7 +479,7 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
             pcm_copied_bytes = delta.copy_telemetry.pcm_copied_bytes
         );
         let frame_index = delta.tick.frame_index;
-        let visual_changed = delta.visual_changed;
+        let visual_damage = delta.visual_damage;
         let audio_operations = delta.audio;
         let video_operations = delta.video;
         let text_operations = delta.text;
@@ -622,7 +622,23 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
             }
         }
 
-        let surface_changed = visual_changed || !session.layer_created;
+        let damage = if !session.layer_created {
+            LegacySurfaceDamageV9::Full
+        } else {
+            match visual_damage {
+                HostedVisualDamage::Unchanged => LegacySurfaceDamageV9::Unchanged,
+                HostedVisualDamage::Full => LegacySurfaceDamageV9::Full,
+                HostedVisualDamage::Rect(rect) => {
+                    LegacySurfaceDamageV9::Rects(vec![LegacyDamageRectV9 {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    }])
+                }
+            }
+        };
+        let surface_changed = !matches!(damage, LegacySurfaceDamageV9::Unchanged);
         let generation = if surface_changed {
             session.surface_generation.checked_add(1).ok_or_else(|| {
                 invalid(
@@ -632,11 +648,6 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
             })?
         } else {
             session.surface_generation
-        };
-        let damage = if surface_changed {
-            LegacySurfaceDamageV9::Full
-        } else {
-            LegacySurfaceDamageV9::Unchanged
         };
         let layer = LegacyLayerStateV9 {
             layer_id: "fvp.main".into(),
@@ -1208,6 +1219,7 @@ mod tests {
         assert_eq!(delta.tick.frame_index, 1);
         assert!(delta.scene.is_empty());
         assert!(delta.visual_changed);
+        assert_eq!(delta.visual_damage, HostedVisualDamage::Full);
         worker.shutdown().expect("worker must stop");
     }
 

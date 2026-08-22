@@ -12,9 +12,9 @@ const MAX_HOSTED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::host_api::{
     AudioParams, AudioStreamDesc, AudioStreamId, ColorRgba, DrawSolidCommand, DrawSpriteCommand,
-    EncodedAudioKind, HostedPixelBuffer, PixelBuffer, PixelFormat, PlatformCallbacks, RfvpAudio,
-    RfvpError, RfvpEvent, RfvpFile, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer,
-    RfvpResult, TextureDesc, TextureId, TextureRect,
+    EncodedAudioKind, HostedPixelBuffer, PixelBuffer, PixelFormat, PlatformCallbacks, RectI32,
+    RfvpAudio, RfvpError, RfvpEvent, RfvpFile, RfvpFileSystem, RfvpHost, RfvpLogLevel,
+    RfvpRenderer, RfvpResult, TextureDesc, TextureId, TextureRect,
 };
 #[cfg(feature = "hosted")]
 pub use crate::no_std_core::{
@@ -277,6 +277,25 @@ pub struct HostedStepDelta {
     /// presented frame. This is derived from typed renderer state, never a
     /// pixel or content hash.
     pub visual_changed: bool,
+    /// Conservative pixel-space damage derived from typed draw commands and
+    /// texture identities. It never scans or hashes framebuffer bytes.
+    pub visual_damage: HostedVisualDamage,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostedVisualDamage {
+    #[default]
+    Unchanged,
+    Full,
+    Rect(HostedDamageRect),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedDamageRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -545,6 +564,7 @@ impl HostedSession {
         let logs = recording.logs.take()?;
         let scene_telemetry = self.renderer.take_copy_telemetry();
         let visual_changed = self.renderer.take_visual_changed();
+        let visual_damage = self.renderer.take_visual_damage();
         let audio_telemetry = recording.audio.copy_telemetry;
         Ok(HostedStepDelta {
             tick,
@@ -580,6 +600,7 @@ impl HostedSession {
             },
             visual_state: self.capture_logs.then(|| self.core.hosted_visual_state()),
             visual_changed,
+            visual_damage,
         })
     }
 
@@ -800,6 +821,68 @@ mod tests {
         assert_eq!(logs.take(), Err(RfvpError::CapacityExceeded));
         assert_eq!(logs.dropped_count, 1);
     }
+
+    #[test]
+    fn direct_frame_damage_is_unchanged_without_semantic_changes() {
+        let frame = solid_frame(RectI32 {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        });
+        assert_eq!(
+            direct_frame_damage(&frame, &frame, &[]),
+            HostedVisualDamage::Unchanged
+        );
+    }
+
+    #[test]
+    fn direct_frame_damage_unions_old_and_new_draw_bounds() {
+        let previous = solid_frame(RectI32 {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        });
+        let current = solid_frame(RectI32 {
+            x: 25,
+            y: 30,
+            width: 30,
+            height: 10,
+        });
+        assert_eq!(
+            direct_frame_damage(&previous, &current, &[]),
+            HostedVisualDamage::Rect(HostedDamageRect {
+                x: 10,
+                y: 20,
+                width: 45,
+                height: 40,
+            })
+        );
+    }
+
+    fn solid_frame(rect: RectI32) -> Vec<DirectFrameCommand> {
+        vec![
+            DirectFrameCommand::BeginFrame {
+                width: 100,
+                height: 100,
+                clear: Some(ColorRgba::BLACK),
+            },
+            DirectFrameCommand::DrawSolid(DrawSolidCommand {
+                rect,
+                color: ColorRgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                blend: crate::host_api::BlendMode::Opaque,
+                scissor: None,
+            }),
+            DirectFrameCommand::EndFrame,
+            DirectFrameCommand::Present,
+        ]
+    }
 }
 
 struct RecordingHost<'a, H: RfvpHost> {
@@ -952,7 +1035,9 @@ struct RecordingRenderer {
     direct_frame: Vec<DirectFrameCommand>,
     previous_direct_frame: Vec<DirectFrameCommand>,
     direct_resource_changed: bool,
+    direct_changed_resources: Vec<TextureId>,
     visual_changed: bool,
+    visual_damage: HostedVisualDamage,
 }
 
 impl RecordingRenderer {
@@ -972,7 +1057,9 @@ impl RecordingRenderer {
             direct_frame: Vec::new(),
             previous_direct_frame: Vec::new(),
             direct_resource_changed: true,
+            direct_changed_resources: Vec::new(),
             visual_changed: true,
+            visual_damage: HostedVisualDamage::Full,
         }
     }
 
@@ -983,7 +1070,9 @@ impl RecordingRenderer {
         self.direct_frame.clear();
         self.previous_direct_frame.clear();
         self.direct_resource_changed = true;
+        self.direct_changed_resources.clear();
         self.visual_changed = true;
+        self.visual_damage = HostedVisualDamage::Full;
     }
 
     fn push(&mut self, operation: HostedSceneOperation) -> RfvpResult<()> {
@@ -1015,6 +1104,10 @@ impl RecordingRenderer {
         core::mem::take(&mut self.visual_changed)
     }
 
+    fn take_visual_damage(&mut self) -> HostedVisualDamage {
+        core::mem::take(&mut self.visual_damage)
+    }
+
     fn push_direct(&mut self, command: DirectFrameCommand) -> RfvpResult<()> {
         self.finish()?;
         self.direct_frame.push(command);
@@ -1024,9 +1117,15 @@ impl RecordingRenderer {
     fn finish_direct_frame(&mut self) {
         let changed = self.direct_resource_changed
             || self.direct_frame.as_slice() != self.previous_direct_frame.as_slice();
+        self.visual_damage = direct_frame_damage(
+            &self.previous_direct_frame,
+            &self.direct_frame,
+            &self.direct_changed_resources,
+        );
         core::mem::swap(&mut self.direct_frame, &mut self.previous_direct_frame);
         self.direct_frame.clear();
         self.direct_resource_changed = false;
+        self.direct_changed_resources.clear();
         self.visual_changed = changed;
     }
 
@@ -1039,7 +1138,9 @@ impl RecordingRenderer {
         self.direct_frame.clear();
         self.previous_direct_frame.clear();
         self.direct_resource_changed = true;
+        self.direct_changed_resources.clear();
         self.visual_changed = true;
+        self.visual_damage = HostedVisualDamage::Full;
     }
 
     fn reserve_texture_bytes(&mut self, additional: usize) -> RfvpResult<()> {
@@ -1075,6 +1176,7 @@ impl RfvpRenderer for RecordingRenderer {
                 self.textures.push((id, desc));
             }
             self.direct_resource_changed = true;
+            remember_texture(&mut self.direct_changed_resources, id);
             return Ok(());
         }
         let pixels = pixels
@@ -1170,6 +1272,7 @@ impl RfvpRenderer for RecordingRenderer {
         if !self.capture {
             validate_texture_region(desc, rect, pixels.len())?;
             self.direct_resource_changed = true;
+            remember_texture(&mut self.direct_changed_resources, id);
             return Ok(());
         }
         let byte_len = pixels.len();
@@ -1222,6 +1325,7 @@ impl RfvpRenderer for RecordingRenderer {
         self.textures.retain(|(known, _)| *known != id);
         if !self.capture {
             self.direct_resource_changed = true;
+            remember_texture(&mut self.direct_changed_resources, id);
         }
     }
 
@@ -1276,6 +1380,177 @@ impl RfvpRenderer for RecordingRenderer {
             self.finish_direct_frame();
             Ok(())
         }
+    }
+}
+
+fn remember_texture(changed: &mut Vec<TextureId>, id: TextureId) {
+    if !changed.contains(&id) {
+        changed.push(id);
+    }
+}
+
+fn direct_frame_damage(
+    previous: &[DirectFrameCommand],
+    current: &[DirectFrameCommand],
+    changed_resources: &[TextureId],
+) -> HostedVisualDamage {
+    let Some((width, height, clear)) = direct_frame_header(current) else {
+        return HostedVisualDamage::Full;
+    };
+    let Some((previous_width, previous_height, previous_clear)) = direct_frame_header(previous)
+    else {
+        return HostedVisualDamage::Full;
+    };
+    if width != previous_width || height != previous_height || clear != previous_clear {
+        return HostedVisualDamage::Full;
+    }
+
+    let mut prefix = 0usize;
+    while prefix < previous.len() && prefix < current.len() && previous[prefix] == current[prefix] {
+        prefix += 1;
+    }
+    let mut previous_suffix = previous.len();
+    let mut current_suffix = current.len();
+    while previous_suffix > prefix
+        && current_suffix > prefix
+        && previous[previous_suffix - 1] == current[current_suffix - 1]
+    {
+        previous_suffix -= 1;
+        current_suffix -= 1;
+    }
+
+    let mut bounds = None;
+    for command in previous[prefix..previous_suffix]
+        .iter()
+        .chain(current[prefix..current_suffix].iter())
+        .chain(previous.iter().filter(|command| {
+            command_texture(command).is_some_and(|id| changed_resources.contains(&id))
+        }))
+        .chain(current.iter().filter(|command| {
+            command_texture(command).is_some_and(|id| changed_resources.contains(&id))
+        }))
+    {
+        let Some(rect) = command_bounds(command, width, height) else {
+            continue;
+        };
+        bounds = Some(union_rect(bounds, rect));
+    }
+
+    match bounds {
+        None => HostedVisualDamage::Unchanged,
+        Some(rect)
+            if rect.x == 0 && rect.y == 0 && rect.width == width && rect.height == height =>
+        {
+            HostedVisualDamage::Full
+        }
+        Some(rect) => HostedVisualDamage::Rect(rect),
+    }
+}
+
+fn direct_frame_header(frame: &[DirectFrameCommand]) -> Option<(u32, u32, Option<ColorRgba>)> {
+    frame.iter().find_map(|command| match command {
+        DirectFrameCommand::BeginFrame {
+            width,
+            height,
+            clear,
+        } => Some((*width, *height, *clear)),
+        _ => None,
+    })
+}
+
+fn command_texture(command: &DirectFrameCommand) -> Option<TextureId> {
+    match command {
+        DirectFrameCommand::DrawSprite(command) => Some(command.texture),
+        _ => None,
+    }
+}
+
+fn command_bounds(
+    command: &DirectFrameCommand,
+    width: u32,
+    height: u32,
+) -> Option<HostedDamageRect> {
+    let (min_x, min_y, max_x, max_y, scissor) = match command {
+        DirectFrameCommand::DrawSprite(command) => {
+            let mut min_x = f32::INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            for vertex in command.vertices {
+                if !vertex.position[0].is_finite() || !vertex.position[1].is_finite() {
+                    return Some(HostedDamageRect {
+                        x: 0,
+                        y: 0,
+                        width,
+                        height,
+                    });
+                }
+                min_x = min_x.min(vertex.position[0]);
+                min_y = min_y.min(vertex.position[1]);
+                max_x = max_x.max(vertex.position[0]);
+                max_y = max_y.max(vertex.position[1]);
+            }
+            (min_x, min_y, max_x, max_y, command.scissor)
+        }
+        DirectFrameCommand::DrawSolid(command) => (
+            command.rect.x as f32,
+            command.rect.y as f32,
+            command.rect.x.saturating_add(command.rect.width) as f32,
+            command.rect.y.saturating_add(command.rect.height) as f32,
+            command.scissor,
+        ),
+        _ => return None,
+    };
+    let mut left = min_x.floor().max(0.0) as i64;
+    let mut top = min_y.floor().max(0.0) as i64;
+    let mut right = max_x.ceil().max(0.0) as i64;
+    let mut bottom = max_y.ceil().max(0.0) as i64;
+    if let Some(RectI32 {
+        x,
+        y,
+        width: clip_width,
+        height: clip_height,
+    }) = scissor
+    {
+        left = left.max(i64::from(x));
+        top = top.max(i64::from(y));
+        right = right.min(i64::from(x).saturating_add(i64::from(clip_width)));
+        bottom = bottom.min(i64::from(y).saturating_add(i64::from(clip_height)));
+    }
+    left = left.clamp(0, i64::from(width));
+    top = top.clamp(0, i64::from(height));
+    right = right.clamp(0, i64::from(width));
+    bottom = bottom.clamp(0, i64::from(height));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(HostedDamageRect {
+        x: left as u32,
+        y: top as u32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
+}
+
+fn union_rect(current: Option<HostedDamageRect>, next: HostedDamageRect) -> HostedDamageRect {
+    let Some(current) = current else {
+        return next;
+    };
+    let left = current.x.min(next.x);
+    let top = current.y.min(next.y);
+    let right = current
+        .x
+        .saturating_add(current.width)
+        .max(next.x.saturating_add(next.width));
+    let bottom = current
+        .y
+        .saturating_add(current.height)
+        .max(next.y.saturating_add(next.height));
+    HostedDamageRect {
+        x: left,
+        y: top,
+        width: right.saturating_sub(left),
+        height: bottom.saturating_sub(top),
     }
 }
 
