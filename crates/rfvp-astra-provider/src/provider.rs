@@ -663,7 +663,7 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
             opacity: 1.0,
             texture_filter: LegacyLayerFilterV9::Linear,
             blend: LegacyLayerBlendV9::Opaque,
-            filter_graph_binding: None,
+            filter_graph: None,
         };
         let layer_transaction = LegacyLayerTransactionV9 {
             sequence: next_sequence,

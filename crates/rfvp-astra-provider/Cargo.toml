@@ -8,11 +8,11 @@ publish = false
 [dependencies]
 abi_stable = "0.11"
 anyhow = "1"
-astra-byte-source = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e" }
-astra-core = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e" }
-astra-emu-family-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e" }
-astra-emu-family-core = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e" }
-astra-emu-extension-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e" }
+astra-byte-source = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "e6bc3d960b87373160acd8507faeac4cc589975b" }
+astra-core = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "e6bc3d960b87373160acd8507faeac4cc589975b" }
+astra-emu-family-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "e6bc3d960b87373160acd8507faeac4cc589975b" }
+astra-emu-family-core = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "e6bc3d960b87373160acd8507faeac4cc589975b" }
+astra-emu-extension-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "e6bc3d960b87373160acd8507faeac4cc589975b" }
 bincode = "1.3"
 encoding_rs = "0.8"
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder" }
