@@ -27,6 +27,8 @@ use crate::soft_render::SoftRenderer;
 use crate::subsystem::anzu_scene::AnzuScene;
 #[cfg(feature = "hosted")]
 use crate::subsystem::global_savedata::GlobalSaveDataV1;
+#[cfg(feature = "hosted")]
+use crate::subsystem::resources::save_manager::{HostedSaveFileOperation, SaveItem};
 use crate::subsystem::resources::text_manager::FontEnumerator;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
@@ -37,7 +39,9 @@ use crate::subsystem::resources::{
     time::TimeSnapshotV1, timer_manager::TimerManagerSnapshotV1,
 };
 #[cfg(feature = "hosted")]
-use crate::subsystem::save_state::{AudioSnapshotV1, SaveStateSnapshotV1};
+use crate::subsystem::save_state::{
+    try_decode_state_chunk_v1, AudioSnapshotV1, SaveStateSnapshotV1,
+};
 use crate::subsystem::world::GameData;
 #[cfg(feature = "hosted")]
 use crate::subsystem::world::RuntimeGameStateSnapshotV1;
@@ -880,6 +884,10 @@ impl RfvpCore {
             self.game_data.set_halt(false);
         }
         host.audio().tick(elapsed_us)?;
+        #[cfg(feature = "hosted")]
+        let loaded_hosted_save = self.process_hosted_load(host)?;
+        #[cfg(not(feature = "hosted"))]
+        let loaded_hosted_save = false;
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
             let dissolve_type = self.game_data.motion_manager.get_dissolve_type();
             let dissolve_transitioning = !matches!(
@@ -893,7 +901,7 @@ impl RfvpCore {
                 || (self.last_dissolve2_transitioning && !dissolve2_transitioning);
             self.last_dissolve_transitioning = dissolve_transitioning;
             self.last_dissolve2_transitioning = dissolve2_transitioning;
-            if dissolve_completed {
+            if dissolve_completed && !loaded_hosted_save {
                 if let Err(err) = vm_runner.tick(&mut self.game_data, parser, 0) {
                     let message = err.to_string();
                     host.log(RfvpLogLevel::Error, &message);
@@ -902,12 +910,14 @@ impl RfvpCore {
                     return Err(RfvpError::Unsupported);
                 }
             }
-            if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
-                let message = err.to_string();
-                host.log(RfvpLogLevel::Error, &message);
-                self.last_error = Some(RfvpError::Unsupported);
-                self.last_error_detail = Some(message);
-                return Err(RfvpError::Unsupported);
+            if !loaded_hosted_save {
+                if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
+                    let message = err.to_string();
+                    host.log(RfvpLogLevel::Error, &message);
+                    self.last_error = Some(RfvpError::Unsupported);
+                    self.last_error_detail = Some(message);
+                    return Err(RfvpError::Unsupported);
+                }
             }
 
             // The original engine advances scripts before text and motion updates.
@@ -916,6 +926,10 @@ impl RfvpCore {
             self.game_data.set_current_thread(0);
 
             self.flush_audio(host)?;
+            #[cfg(feature = "hosted")]
+            self.persist_hosted_file_operations(host)?;
+            #[cfg(feature = "hosted")]
+            self.persist_hosted_save(host)?;
             self.render_game_frame(host)?;
             self.game_data.inputs_manager.frame_reset();
         } else if self.run_state == RfvpCoreRunState::BootFailed {
@@ -928,6 +942,116 @@ impl RfvpCore {
             consumed_events,
             elapsed_us,
         })
+    }
+
+    #[cfg(feature = "hosted")]
+    fn process_hosted_load<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<bool> {
+        let Some(slot) = self.game_data.save_manager.take_load_request() else {
+            return Ok(false);
+        };
+        let path = SaveItem::get_save_path(slot);
+        let path = path.to_str().ok_or(RfvpError::InvalidData)?;
+        let mut file = host.fs().open(path)?;
+        let bytes = file.read_to_vec(64 * 1024 * 1024)?;
+        let nls = self.game_data.get_nls();
+        self.game_data
+            .save_manager
+            .load_slot_into_current_from_bytes(slot, nls, &bytes)
+            .map_err(|_| RfvpError::InvalidData)?;
+        let snapshot = try_decode_state_chunk_v1(&bytes)
+            .map_err(|_| RfvpError::InvalidData)?
+            .ok_or(RfvpError::InvalidData)?;
+        let vm_runner = self.vm_runner.as_mut().ok_or(RfvpError::InvalidData)?;
+        snapshot
+            .apply(&mut self.game_data, vm_runner.thread_manager_mut())
+            .map_err(|_| RfvpError::InvalidData)?;
+        Ok(true)
+    }
+
+    #[cfg(feature = "hosted")]
+    fn persist_hosted_save<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let Some((slot, thumb_width, thumb_height)) =
+            self.game_data.save_manager.pending_save_capture()
+        else {
+            return Ok(());
+        };
+        if slot >= 1000 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        let snapshot =
+            SaveStateSnapshotV1::capture_hosted(&self.game_data, vm_runner.thread_manager());
+        let thumb = render_hosted_save_thumbnail(
+            &self.game_data.motion_manager,
+            self.config.virtual_width,
+            self.config.virtual_height,
+            thumb_width.max(1),
+            thumb_height.max(1),
+        )?;
+        let nls = self.game_data.get_nls();
+        let bytes = self
+            .game_data
+            .save_manager
+            .build_and_store_hosted_save(slot, thumb, &snapshot, nls)
+            .map_err(|_| RfvpError::InvalidData)?;
+        let path = SaveItem::get_save_path(slot);
+        let path = path.to_str().ok_or(RfvpError::InvalidData)?;
+        host.fs().write_all(path, &bytes)?;
+        self.game_data.save_manager.consume_save_write_result();
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    fn persist_hosted_file_operations<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let operations = self.game_data.save_manager.take_file_operations();
+        for operation in operations {
+            match operation {
+                HostedSaveFileOperation::Refresh => self.refresh_hosted_saves(host)?,
+                HostedSaveFileOperation::Remove { slot } => {
+                    let path = SaveItem::get_save_path(slot);
+                    host.fs()
+                        .remove(path.to_str().ok_or(RfvpError::InvalidData)?)?;
+                }
+                HostedSaveFileOperation::Copy {
+                    source,
+                    destination,
+                } => {
+                    let source = SaveItem::get_save_path(source);
+                    let destination = SaveItem::get_save_path(destination);
+                    host.fs().copy(
+                        source.to_str().ok_or(RfvpError::InvalidData)?,
+                        destination.to_str().ok_or(RfvpError::InvalidData)?,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    fn refresh_hosted_saves<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let mut entries = Vec::new();
+        host.fs().list("save", &mut |path, info| {
+            if info.kind == crate::host_api::RfvpFileKind::File {
+                entries.push(path.to_owned());
+            }
+            Ok(())
+        })?;
+        entries.sort();
+        self.game_data.save_manager.clear_cached_slots();
+        let nls = self.game_data.get_nls();
+        for path in entries {
+            let Some(slot) = hosted_save_slot_from_path(&path) else {
+                continue;
+            };
+            let mut file = host.fs().open(&path)?;
+            let bytes = file.read_to_vec(64 * 1024 * 1024)?;
+            self.game_data
+                .save_manager
+                .load_slot_into_current_from_bytes(slot, nls.clone(), &bytes)
+                .map_err(|_| RfvpError::InvalidData)?;
+        }
+        Ok(())
     }
 
     pub fn render_empty_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
@@ -1073,6 +1197,59 @@ impl RfvpCore {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "hosted")]
+fn render_hosted_save_thumbnail(
+    motion: &crate::subsystem::resources::motion_manager::MotionManager,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> RfvpResult<Vec<u8>> {
+    let mut renderer = SoftRenderer::new(
+        source_width,
+        source_height,
+        crate::soft_render::PixelFormat::Rgba8,
+    )
+    .map_err(|_| RfvpError::CapacityExceeded)?;
+    renderer
+        .render_motion(motion)
+        .map_err(|_| RfvpError::InvalidData)?;
+    let source = renderer.framebuffer().pixels();
+    let target_len = usize::try_from(
+        u64::from(target_width)
+            .checked_mul(u64::from(target_height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(RfvpError::CapacityExceeded)?,
+    )
+    .map_err(|_| RfvpError::CapacityExceeded)?;
+    let mut target = vec![0; target_len];
+    for y in 0..target_height {
+        let source_y = u64::from(y) * u64::from(source_height) / u64::from(target_height);
+        for x in 0..target_width {
+            let source_x = u64::from(x) * u64::from(source_width) / u64::from(target_width);
+            let source_offset =
+                usize::try_from((source_y * u64::from(source_width) + source_x) * 4)
+                    .map_err(|_| RfvpError::CapacityExceeded)?;
+            let target_offset =
+                usize::try_from((u64::from(y) * u64::from(target_width) + u64::from(x)) * 4)
+                    .map_err(|_| RfvpError::CapacityExceeded)?;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(feature = "hosted")]
+fn hosted_save_slot_from_path(path: &str) -> Option<u32> {
+    let name = path.strip_prefix("save/save")?.strip_suffix(".dat")?;
+    if name.len() != 3 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let slot = name.parse().ok()?;
+    (slot < 1000).then_some(slot)
 }
 
 #[cfg(feature = "old_school")]

@@ -9,7 +9,9 @@ use std::{
 };
 
 use astra_byte_source::{ByteRange, OwnedByteBuffer, SourceRevision};
-use astra_emu_family_api::LegacyVfsReader;
+use astra_emu_family_api::{
+    LegacyVfsReader, LegacyWritableFileHostV1, LegacyWritableFileRequestV1,
+};
 use rfvp_hosted::host_api::{
     AudioParams, AudioStreamDesc, AudioStreamId, ColorRgba, DrawSolidCommand, DrawSpriteCommand,
     EncodedAudioKind, PixelBuffer, RfvpAudio, RfvpClock, RfvpError, RfvpFile, RfvpFileInfo,
@@ -23,6 +25,7 @@ pub const MAX_HOSTED_FILES: usize = 65_536;
 // caller and every individual VFS range remains at most 16 MiB.
 pub const MAX_HOSTED_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_HOSTED_RANGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_HOSTED_WRITABLE_BYTES: u64 = 64 * 1024 * 1024;
 const HOSTED_VFS_PAGE_BYTES: usize = 1024 * 1024;
 
 pub enum HostedFileSource {
@@ -39,6 +42,12 @@ pub struct HostedMemoryHost {
     renderer: RejectingRenderer,
     audio: RejectingAudio,
     clock: StepClock,
+}
+
+struct HostedWritablePort {
+    host: Arc<dyn LegacyWritableFileHostV1>,
+    session_id: String,
+    next_temporary_id: u64,
 }
 
 pub type HostedVfsHost = HostedMemoryHost;
@@ -62,6 +71,7 @@ impl HostedMemoryHost {
         Ok(Self {
             fs: HostedMemoryFileSystem {
                 source: HostedFileSource::Memory(Arc::new(normalized)),
+                writable: None,
             },
             renderer: RejectingRenderer,
             audio: RejectingAudio,
@@ -94,11 +104,28 @@ impl HostedMemoryHost {
                     mount_set_id,
                     pack_paths: normalized_pack_paths,
                 },
+                writable: None,
             },
             renderer: RejectingRenderer,
             audio: RejectingAudio,
             clock: StepClock::default(),
         })
+    }
+
+    pub fn bind_writable(
+        &mut self,
+        host: Arc<dyn LegacyWritableFileHostV1>,
+        session_id: String,
+    ) -> RfvpResult<()> {
+        if session_id.is_empty() || self.fs.writable.is_some() {
+            return Err(RfvpError::InvalidArgument);
+        }
+        self.fs.writable = Some(HostedWritablePort {
+            host,
+            session_id,
+            next_temporary_id: 1,
+        });
+        Ok(())
     }
 
     pub fn advance(&mut self, delta_ns: u64) -> RfvpResult<()> {
@@ -142,6 +169,7 @@ impl RfvpHost for HostedMemoryHost {
 
 pub struct HostedMemoryFileSystem {
     source: HostedFileSource,
+    writable: Option<HostedWritablePort>,
 }
 pub enum HostedMemoryFile {
     Memory {
@@ -162,6 +190,37 @@ impl RfvpFileSystem for HostedMemoryFileSystem {
     type File = HostedMemoryFile;
     fn open(&mut self, path: &str) -> RfvpResult<Self::File> {
         let path = normalize(path)?;
+        if let Some(writable) = self.writable.as_ref() {
+            let stat = writable
+                .host
+                .execute(
+                    &writable.session_id,
+                    LegacyWritableFileRequestV1::Stat { path: path.clone() },
+                )
+                .map_err(map_writable_error)?;
+            if stat.exists {
+                if !stat.is_file || stat.length > MAX_HOSTED_WRITABLE_BYTES {
+                    return Err(RfvpError::InvalidData);
+                }
+                let bytes = writable
+                    .host
+                    .execute(
+                        &writable.session_id,
+                        LegacyWritableFileRequestV1::ReadRange {
+                            path: path.clone(),
+                            offset: 0,
+                            length: stat.length,
+                        },
+                    )
+                    .map_err(map_writable_error)?;
+                if bytes.bytes.len() as u64 != stat.length {
+                    return Err(RfvpError::InvalidData);
+                }
+                return Ok(HostedMemoryFile::Memory {
+                    bytes: bytes.bytes.as_slice().to_vec(),
+                });
+            }
+        }
         match &self.source {
             HostedFileSource::Memory(files) => files
                 .get(&path)
@@ -191,8 +250,150 @@ impl RfvpFileSystem for HostedMemoryFileSystem {
             }
         }
     }
+    fn write_all(&mut self, path: &str, bytes: &[u8]) -> RfvpResult<()> {
+        if bytes.len() as u64 > MAX_HOSTED_FILE_BYTES {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        let path = normalize(path)?;
+        let writable = self.writable.as_mut().ok_or(RfvpError::Unsupported)?;
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            writable
+                .host
+                .execute(
+                    &writable.session_id,
+                    LegacyWritableFileRequestV1::CreateDir {
+                        path: parent.to_owned(),
+                    },
+                )
+                .map_err(map_writable_error)?;
+        }
+        let temporary = format!(
+            ".astra-tmp/write-{}-{}",
+            writable.next_temporary_id,
+            path.replace('/', "_")
+        );
+        writable.next_temporary_id = writable
+            .next_temporary_id
+            .checked_add(1)
+            .ok_or(RfvpError::CapacityExceeded)?;
+        writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::CreateDir {
+                    path: ".astra-tmp".into(),
+                },
+            )
+            .map_err(map_writable_error)?;
+        writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::WriteRange {
+                    path: temporary.clone(),
+                    offset: 0,
+                    bytes: bytes.to_vec(),
+                },
+            )
+            .map_err(map_writable_error)?;
+        writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::SetLength {
+                    path: temporary.clone(),
+                    length: bytes.len() as u64,
+                },
+            )
+            .map_err(map_writable_error)?;
+        writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::AtomicReplace {
+                    temporary_path: temporary,
+                    destination_path: path,
+                },
+            )
+            .map_err(map_writable_error)?;
+        Ok(())
+    }
+    fn remove(&mut self, path: &str) -> RfvpResult<()> {
+        let path = normalize(path)?;
+        let writable = self.writable.as_ref().ok_or(RfvpError::Unsupported)?;
+        writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::Remove { path },
+            )
+            .map_err(map_writable_error)?;
+        Ok(())
+    }
+    fn copy(&mut self, source: &str, destination: &str) -> RfvpResult<()> {
+        let source = normalize(source)?;
+        let destination = normalize(destination)?;
+        let mut file = self.open(&source)?;
+        let bytes = file.read_to_vec(MAX_HOSTED_FILE_BYTES as usize)?;
+        self.write_all(&destination, &bytes)
+    }
+    fn list(
+        &mut self,
+        root: &str,
+        visitor: &mut dyn FnMut(&str, RfvpFileInfo) -> RfvpResult<()>,
+    ) -> RfvpResult<()> {
+        let root = normalize(root)?;
+        let writable = self.writable.as_ref().ok_or(RfvpError::Unsupported)?;
+        let stat = writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::Stat { path: root.clone() },
+            )
+            .map_err(map_writable_error)?;
+        if !stat.exists {
+            return Ok(());
+        }
+        if stat.is_file {
+            return Err(RfvpError::InvalidData);
+        }
+        let result = writable
+            .host
+            .execute(
+                &writable.session_id,
+                LegacyWritableFileRequestV1::List { path: root.clone() },
+            )
+            .map_err(map_writable_error)?;
+        for entry in result.entries {
+            let path = format!("{root}/{}", entry.name);
+            visitor(
+                &path,
+                RfvpFileInfo {
+                    len: entry.length,
+                    kind: if entry.is_file {
+                        rfvp_hosted::host_api::RfvpFileKind::File
+                    } else {
+                        rfvp_hosted::host_api::RfvpFileKind::Directory
+                    },
+                },
+            )?;
+        }
+        Ok(())
+    }
     fn metadata(&mut self, path: &str) -> RfvpResult<RfvpFileInfo> {
         let path = normalize(path)?;
+        if let Some(writable) = self.writable.as_ref() {
+            let stat = writable
+                .host
+                .execute(
+                    &writable.session_id,
+                    LegacyWritableFileRequestV1::Stat { path: path.clone() },
+                )
+                .map_err(map_writable_error)?;
+            if stat.exists {
+                return Ok(RfvpFileInfo::file(stat.length));
+            }
+        }
         match &self.source {
             HostedFileSource::Memory(files) => files
                 .get(&path)
@@ -485,14 +686,134 @@ fn map_vfs_error(error: astra_emu_family_api::LegacyProviderError) -> RfvpError 
     }
 }
 
+fn map_writable_error(_: astra_emu_family_api::LegacyProviderError) -> RfvpError {
+    RfvpError::Io
+}
+
 #[cfg(test)]
 mod tests {
-    use astra_byte_source::{ByteSourceStat, RangeReadResult};
+    use std::sync::Mutex;
+
+    use astra_byte_source::{ByteSourceStat, OwnedByteBuffer, RangeReadResult};
+    use astra_emu_family_api::{
+        LegacyProviderError, LegacyWritableFileEntryV1, LegacyWritableFileResultV1,
+    };
 
     use super::*;
 
     struct TestVfsReader {
         bytes: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    struct TestWritableHost {
+        files: Mutex<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl LegacyWritableFileHostV1 for TestWritableHost {
+        fn execute(
+            &self,
+            session_id: &str,
+            request: LegacyWritableFileRequestV1,
+        ) -> Result<LegacyWritableFileResultV1, LegacyProviderError> {
+            if session_id != "session.test" {
+                return Err(LegacyProviderError::invalid(
+                    "TEST_SESSION",
+                    "unexpected writable session",
+                ));
+            }
+            let mut files = self.files.lock().expect("test writable lock");
+            let empty = || LegacyWritableFileResultV1 {
+                exists: false,
+                is_file: false,
+                length: 0,
+                entries: Vec::new(),
+                bytes: OwnedByteBuffer::default(),
+                written: 0,
+            };
+            match request {
+                LegacyWritableFileRequestV1::Stat { path } => Ok(files
+                    .get(&path)
+                    .map(|bytes| LegacyWritableFileResultV1 {
+                        exists: true,
+                        is_file: true,
+                        length: bytes.len() as u64,
+                        ..empty()
+                    })
+                    .unwrap_or_else(empty)),
+                LegacyWritableFileRequestV1::CreateDir { .. } => Ok(empty()),
+                LegacyWritableFileRequestV1::WriteRange {
+                    path,
+                    offset,
+                    bytes,
+                } => {
+                    let file = files.entry(path).or_default();
+                    let offset = offset as usize;
+                    file.resize(offset.saturating_add(bytes.len()), 0);
+                    file[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                    Ok(LegacyWritableFileResultV1 {
+                        written: bytes.len() as u64,
+                        ..empty()
+                    })
+                }
+                LegacyWritableFileRequestV1::SetLength { path, length } => {
+                    files.entry(path).or_default().resize(length as usize, 0);
+                    Ok(empty())
+                }
+                LegacyWritableFileRequestV1::AtomicReplace {
+                    temporary_path,
+                    destination_path,
+                } => {
+                    let bytes = files.remove(&temporary_path).ok_or_else(|| {
+                        LegacyProviderError::invalid("TEST_TEMP", "temporary file missing")
+                    })?;
+                    files.insert(destination_path, bytes);
+                    Ok(empty())
+                }
+                LegacyWritableFileRequestV1::ReadRange {
+                    path,
+                    offset,
+                    length,
+                } => {
+                    let bytes = files
+                        .get(&path)
+                        .ok_or_else(|| LegacyProviderError::invalid("TEST_FILE", "file missing"))?;
+                    let start = offset as usize;
+                    let end = start + length as usize;
+                    Ok(LegacyWritableFileResultV1 {
+                        exists: true,
+                        is_file: true,
+                        length: bytes.len() as u64,
+                        bytes: OwnedByteBuffer::from_vec(bytes[start..end].to_vec()),
+                        ..empty()
+                    })
+                }
+                LegacyWritableFileRequestV1::Remove { path } => {
+                    files.remove(&path);
+                    Ok(empty())
+                }
+                LegacyWritableFileRequestV1::List { path } => {
+                    let prefix = format!("{path}/");
+                    let entries = files
+                        .iter()
+                        .filter_map(|(name, bytes)| {
+                            name.strip_prefix(&prefix).and_then(|name| {
+                                (!name.contains('/')).then(|| LegacyWritableFileEntryV1 {
+                                    name: name.to_owned(),
+                                    is_file: true,
+                                    length: bytes.len() as u64,
+                                })
+                            })
+                        })
+                        .collect();
+                    Ok(LegacyWritableFileResultV1 {
+                        exists: true,
+                        entries,
+                        ..empty()
+                    })
+                }
+            }
+        }
     }
 
     impl LegacyVfsReader for TestVfsReader {
@@ -582,5 +903,26 @@ mod tests {
             expected.len()
         );
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn writable_port_uses_atomic_replace_and_reads_the_committed_file() {
+        let writable = Arc::new(TestWritableHost::default());
+        let mut host = HostedMemoryHost::new(BTreeMap::new()).expect("empty case host");
+        host.bind_writable(writable.clone(), "session.test".into())
+            .expect("writable port binds once");
+        host.fs()
+            .write_all("save/save001.dat", &[1, 2, 3, 4])
+            .expect("atomic save write");
+        assert_eq!(
+            writable
+                .files
+                .lock()
+                .expect("test writable lock")
+                .get("save/save001.dat"),
+            Some(&vec![1, 2, 3, 4])
+        );
+        let mut file = host.fs().open("save/save001.dat").expect("open save");
+        assert_eq!(file.read_to_vec(16).expect("read save"), [1, 2, 3, 4]);
     }
 }

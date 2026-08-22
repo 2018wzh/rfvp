@@ -322,6 +322,16 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
         };
         let script_uri = normalize_vfs_path(&request.script_uri)
             .map_err(|message| invalid("ASTRA_FVP_SCRIPT_URI", message))?;
+        let host = self.host.as_ref().ok_or_else(|| {
+            invalid(
+                "ASTRA_FVP_HOST_SERVICES_MISSING",
+                "Family ABI v9 host services are not bound",
+            )
+        })?;
+        let writable = crate::hosted_runtime::HostedWritableConfig {
+            host: host.writable_files.clone(),
+            session_id: request.requested_session_id.0.clone(),
+        };
         let runtime = if let Some(image) = self.cases.get(&request.case_fingerprint) {
             if image.root_mount_id != ctx.mount_set_id {
                 return Err(invalid(
@@ -329,7 +339,7 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
                     "host mount does not match the registered case",
                 ));
             }
-            HostedFvpSession::open_case(
+            HostedFvpSession::open_case_with_writable(
                 image.files.clone(),
                 script_uri.clone(),
                 image.script_bytes.clone(),
@@ -337,19 +347,10 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
                 stage_width,
                 stage_height,
                 trace_profile,
+                Some(writable),
             )
             .map_err(|error| invalid("ASTRA_FVP_OPEN", error.to_string()))?
         } else {
-            let host = self
-                .host
-                .as_ref()
-                .ok_or_else(|| {
-                    invalid(
-                        "ASTRA_FVP_CASE_MISSING",
-                        "case is not registered and no host VFS is bound",
-                    )
-                })?
-                .clone();
             let script_bytes =
                 host.vfs
                     .read_file(&ctx.mount_set_id, &script_uri, MAX_FILE_BYTES as u64)?;
@@ -370,6 +371,7 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
                 stage_width,
                 stage_height,
                 trace_profile,
+                writable: Some(writable),
             })
             .map_err(|error| invalid("ASTRA_FVP_OPEN", error.to_string()))?
         };

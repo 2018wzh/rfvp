@@ -7,7 +7,7 @@ use alloc::{
     vec::Vec,
 };
 use anyhow::{bail, Context, Result};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ const SAVE_STATE_MAGIC: [u8; 4] = *b"RFVS";
 const SAVE_STATE_FOOTER_LEN: usize = 8; // u32 payload_len + 4-byte magic
 const MAX_STATE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 fn bincode_opts() -> impl bincode::Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -137,8 +137,7 @@ impl SaveStateSnapshotV1 {
             if self.globals_non_volatile.len() != globals.non_volatile_count as usize {
                 bail!("hosted snapshot global count is incompatible with this session");
             }
-            values[..self.globals_non_volatile.len()]
-                .clone_from_slice(&self.globals_non_volatile);
+            values[..self.globals_non_volatile.len()].clone_from_slice(&self.globals_non_volatile);
             let snapshot = crate::script::global::HostedGlobalSnapshot {
                 non_volatile_count: globals.non_volatile_count,
                 volatile_count: globals.volatile_count,
@@ -155,13 +154,13 @@ impl SaveStateSnapshotV1 {
 }
 
 pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> Result<()> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = (out, snap);
         bail!("SaveStateSnapshotV1 serialization requires the std desktop bincode adapter");
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         let payload = bincode_opts()
             .serialize(snap)
@@ -187,13 +186,13 @@ pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> R
 }
 
 pub fn try_decode_state_chunk_v1(file_bytes: &[u8]) -> Result<Option<SaveStateSnapshotV1>> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = file_bytes;
         return Ok(None);
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         if file_bytes.len() < SAVE_STATE_FOOTER_LEN {
             return Ok(None);

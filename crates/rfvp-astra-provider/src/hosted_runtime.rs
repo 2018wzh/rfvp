@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use astra_emu_family_api::LegacyVfsReader;
+use astra_emu_family_api::{LegacyVfsReader, LegacyWritableFileHostV1};
 use rfvp_hosted::{
     hosted::{
         HostedBootConfig, HostedConfig, HostedLimits, HostedSession, HostedStepDelta,
@@ -35,6 +35,13 @@ pub struct HostedVfsSessionConfig {
     pub stage_width: u32,
     pub stage_height: u32,
     pub trace_profile: HostedTraceProfile,
+    pub writable: Option<HostedWritableConfig>,
+}
+
+#[derive(Clone)]
+pub struct HostedWritableConfig {
+    pub host: std::sync::Arc<dyn LegacyWritableFileHostV1>,
+    pub session_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -65,6 +72,28 @@ pub struct HostedFvpSession {
 
 impl HostedFvpSession {
     pub fn open_case(
+        files: BTreeMap<String, Vec<u8>>,
+        script_uri: String,
+        script_bytes: Vec<u8>,
+        nls: FvpNls,
+        stage_width: u32,
+        stage_height: u32,
+        trace_profile: HostedTraceProfile,
+    ) -> Result<Self, HostedRuntimeError> {
+        Self::open_case_with_writable(
+            files,
+            script_uri,
+            script_bytes,
+            nls,
+            stage_width,
+            stage_height,
+            trace_profile,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_case_with_writable(
         mut files: BTreeMap<String, Vec<u8>>,
         script_uri: String,
         script_bytes: Vec<u8>,
@@ -72,6 +101,7 @@ impl HostedFvpSession {
         stage_width: u32,
         stage_height: u32,
         trace_profile: HostedTraceProfile,
+        writable: Option<HostedWritableConfig>,
     ) -> Result<Self, HostedRuntimeError> {
         if !script_uri.ends_with(".hcb") {
             return Err(HostedRuntimeError::ScriptUri);
@@ -83,6 +113,10 @@ impl HostedFvpSession {
         }
         let worker = HostedSessionWorker::try_spawn(move || {
             let mut host = HostedMemoryHost::new(files).map_err(HostedRuntimeError::Core)?;
+            if let Some(writable) = writable {
+                host.bind_writable(writable.host, writable.session_id)
+                    .map_err(HostedRuntimeError::Core)?;
+            }
             let mut core = HostedSession::new(
                 HostedConfig {
                     virtual_width: stage_width,
@@ -121,21 +155,35 @@ impl HostedFvpSession {
     /// extension; accepting a different discovered script would break the
     /// package binding even if both files are otherwise valid.
     pub fn open_vfs(config: HostedVfsSessionConfig) -> Result<Self, HostedRuntimeError> {
-        let expected_script_uri = normalize_script_uri(&config.expected_script_uri)?;
+        let HostedVfsSessionConfig {
+            reader,
+            mount_set_id,
+            expected_script_uri,
+            pack_paths,
+            nls,
+            stage_width,
+            stage_height,
+            trace_profile,
+            writable,
+        } = config;
+        let expected_script_uri = normalize_script_uri(&expected_script_uri)?;
         let worker = HostedSessionWorker::try_spawn(move || {
-            let mut host =
-                HostedMemoryHost::from_vfs(config.reader, config.mount_set_id, config.pack_paths)
+            let mut host = HostedMemoryHost::from_vfs(reader, mount_set_id, pack_paths)
+                .map_err(HostedRuntimeError::Core)?;
+            if let Some(writable) = writable {
+                host.bind_writable(writable.host, writable.session_id)
                     .map_err(HostedRuntimeError::Core)?;
+            }
             let mut core = HostedSession::new(
                 HostedConfig {
-                    virtual_width: config.stage_width,
-                    virtual_height: config.stage_height,
+                    virtual_width: stage_width,
+                    virtual_height: stage_height,
                     ..HostedConfig::default()
                 },
                 HostedLimits::default(),
             )
             .map_err(HostedRuntimeError::Core)?;
-            core.set_trace_profile(config.trace_profile)
+            core.set_trace_profile(trace_profile)
                 .map_err(HostedRuntimeError::Core)?;
             if let Err(error) = core.boot(
                 &mut host,
@@ -144,7 +192,7 @@ impl HostedFvpSession {
                     hcb_extension: "hcb",
                     max_hcb_bytes: MAX_HOSTED_HCB_BYTES,
                     max_manifest_entries: MAX_HOSTED_CASE_FILES,
-                    nls: map_nls(config.nls),
+                    nls: map_nls(nls),
                 },
             ) {
                 let detail = core.core().last_error_detail().unwrap_or("unspecified");

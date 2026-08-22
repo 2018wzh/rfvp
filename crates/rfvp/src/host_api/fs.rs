@@ -83,6 +83,22 @@ pub trait RfvpFileSystem {
         Err(RfvpError::Unsupported)
     }
 
+    fn remove(&mut self, _path: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn copy(&mut self, _source: &str, _destination: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn list(
+        &mut self,
+        _root: &str,
+        _visitor: &mut dyn FnMut(&str, RfvpFileInfo) -> RfvpResult<()>,
+    ) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
     fn metadata(&mut self, path: &str) -> RfvpResult<RfvpFileInfo>;
 
     fn exists(&mut self, path: &str) -> bool {
