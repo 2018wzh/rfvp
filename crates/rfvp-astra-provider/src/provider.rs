@@ -204,12 +204,6 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
         request: LegacyProbeRequest,
     ) -> Result<LegacyProbeReport, LegacyProviderError> {
         ctx.validate()?;
-        if request.max_entries == 0 || request.max_metadata_bytes < 64 {
-            return Err(invalid(
-                "ASTRA_FVP_PROBE_BUDGET",
-                "probe budget is too small",
-            ));
-        }
         let (script, fingerprint, detected_nls) = if let Ok(image) =
             self.case_for_mount(&request.root_mount_id)
         {
@@ -226,18 +220,14 @@ impl LegacyRuntimeProvider for FvpRuntimeProvider {
                 )
             })?;
             let mut matches = Vec::new();
-            for uri in request
-                .candidate_uris
-                .iter()
-                .take(request.max_entries as usize)
-            {
+            for uri in &request.candidate_uris {
                 if !uri.to_ascii_lowercase().ends_with(".hcb") {
                     continue;
                 }
                 let bytes = host.vfs.read_file(
                     &request.root_mount_id,
                     uri,
-                    request.max_metadata_bytes.min(MAX_FILE_BYTES as u64),
+                    MAX_FILE_BYTES as u64,
                 )?;
                 for nls in [FvpNls::ShiftJis, FvpNls::Gbk, FvpNls::Utf8] {
                     if let Ok(script) = FvpHcbScript::parse(bytes.clone(), nls) {
