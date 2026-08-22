@@ -22,6 +22,8 @@ use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache
 #[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::parser::{Nls, Parser};
+#[cfg(feature = "hosted")]
+use crate::soft_render::SoftRenderer;
 use crate::subsystem::anzu_scene::AnzuScene;
 #[cfg(feature = "hosted")]
 use crate::subsystem::global_savedata::GlobalSaveDataV1;
@@ -934,6 +936,32 @@ impl RfvpCore {
 
     pub fn render_status_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
         self.render_game_frame(host)
+    }
+
+    /// Applies a completed hosted text Hook result before the presentation surface is acquired.
+    #[cfg(feature = "hosted")]
+    pub fn replace_hosted_text(&mut self, slot: u8, text: &str) -> RfvpResult<()> {
+        if slot >= 32 || text.len() >= 512 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let slot = i32::from(slot);
+        self.game_data
+            .motion_manager
+            .text_manager
+            .set_text_content(slot, text);
+        self.game_data
+            .motion_manager
+            .text_upload_slot(slot, &self.game_data.fontface_manager, true)
+            .map_err(|_| RfvpError::InvalidData)?;
+        Ok(())
+    }
+
+    /// Rasterizes the authoritative RFVP scene directly into the currently bound buffer.
+    #[cfg(feature = "hosted")]
+    pub fn render_hosted_software(&self, renderer: &mut SoftRenderer) -> RfvpResult<()> {
+        renderer
+            .render_motion(&self.game_data.motion_manager)
+            .map_err(|_| RfvpError::InvalidData)
     }
 
     fn render_game_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {

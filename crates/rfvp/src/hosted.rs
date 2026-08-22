@@ -273,6 +273,10 @@ pub struct HostedStepDelta {
     pub log_dropped_count: u32,
     pub copy_telemetry: HostedCopyTelemetry,
     pub visual_state: Option<HostedVisualState>,
+    /// True when the direct Astra presentation state differs from the last
+    /// presented frame. This is derived from typed renderer state, never a
+    /// pixel or content hash.
+    pub visual_changed: bool,
 }
 
 /// The production profile leaves instruction evidence disabled. Evidence is
@@ -313,6 +317,7 @@ pub struct HostedSession {
     // reuses texture ids across ticks; recreating this recorder per tick turns
     // those updates into duplicate creates at every embedding boundary.
     renderer: RecordingRenderer,
+    direct_renderer: Option<crate::soft_render::SoftRenderer>,
     capture_logs: bool,
 }
 
@@ -336,8 +341,44 @@ impl HostedSession {
             core,
             limits,
             renderer: RecordingRenderer::new(limits),
+            direct_renderer: None,
             capture_logs: false,
         })
+    }
+
+    /// Selects the Astra hosted path where RFVP rasterizes into the Host surface directly.
+    pub fn use_direct_surface(&mut self) {
+        self.renderer.set_capture(false);
+        self.core.invalidate_host_render_cache();
+    }
+
+    /// Applies successful synchronous Hook results before acquiring a presentation surface.
+    pub fn replace_text(&mut self, slot: u8, text: &str) -> RfvpResult<()> {
+        self.core.replace_hosted_text(slot, text)
+    }
+
+    /// Moves a Host lease allocation into RFVP, rasterizes in place, and returns that allocation.
+    pub fn render_direct_surface(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: crate::soft_render::PixelFormat,
+        pixels: astra_byte_source::OwnedWritableByteBuffer,
+    ) -> RfvpResult<astra_byte_source::OwnedWritableByteBuffer> {
+        let renderer = match self.direct_renderer.as_mut() {
+            Some(renderer) => renderer,
+            None => self.direct_renderer.insert(
+                crate::soft_render::SoftRenderer::new(width, height, format)
+                    .map_err(|_| RfvpError::CapacityExceeded)?,
+            ),
+        };
+        renderer
+            .replace_astra_surface(width, height, format, pixels)
+            .map_err(|_| RfvpError::InvalidData)?;
+        self.core.render_hosted_software(renderer)?;
+        renderer
+            .take_astra_surface()
+            .map_err(|_| RfvpError::InvalidData)
     }
 
     pub fn core(&self) -> &RfvpCore {
@@ -481,7 +522,11 @@ impl HostedSession {
             self.core.push_event(event)?;
         }
 
-        let renderer = std::mem::replace(&mut self.renderer, RecordingRenderer::new(self.limits));
+        let capture = self.renderer.capture;
+        let renderer = std::mem::replace(
+            &mut self.renderer,
+            RecordingRenderer::with_capture(self.limits, capture),
+        );
         let mut recording =
             RecordingHost::with_renderer(host, renderer, self.limits, self.capture_logs);
         let tick_result = self.core.tick(&mut recording);
@@ -499,6 +544,7 @@ impl HostedSession {
             .collect::<Vec<_>>();
         let logs = recording.logs.take()?;
         let scene_telemetry = self.renderer.take_copy_telemetry();
+        let visual_changed = self.renderer.take_visual_changed();
         let audio_telemetry = recording.audio.copy_telemetry;
         Ok(HostedStepDelta {
             tick,
@@ -533,6 +579,7 @@ impl HostedSession {
                 pcm_copied_bytes: audio_telemetry.pcm_copied_bytes,
             },
             visual_state: self.capture_logs.then(|| self.core.hosted_visual_state()),
+            visual_changed,
         })
     }
 
@@ -881,6 +928,19 @@ fn classify_hosted_log(level: RfvpLogLevel, message: &str) -> HostedLogEvent {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum DirectFrameCommand {
+    BeginFrame {
+        width: u32,
+        height: u32,
+        clear: Option<ColorRgba>,
+    },
+    DrawSprite(DrawSpriteCommand),
+    DrawSolid(DrawSolidCommand),
+    EndFrame,
+    Present,
+}
+
 struct RecordingRenderer {
     limits: HostedLimits,
     texture_bytes: usize,
@@ -888,10 +948,19 @@ struct RecordingRenderer {
     textures: Vec<(TextureId, TextureDesc)>,
     failure: Option<RfvpError>,
     copy_telemetry: HostedCopyTelemetry,
+    capture: bool,
+    direct_frame: Vec<DirectFrameCommand>,
+    previous_direct_frame: Vec<DirectFrameCommand>,
+    direct_resource_changed: bool,
+    visual_changed: bool,
 }
 
 impl RecordingRenderer {
     fn new(limits: HostedLimits) -> Self {
+        Self::with_capture(limits, true)
+    }
+
+    fn with_capture(limits: HostedLimits, capture: bool) -> Self {
         Self {
             limits,
             texture_bytes: 0,
@@ -899,11 +968,29 @@ impl RecordingRenderer {
             textures: Vec::new(),
             failure: None,
             copy_telemetry: HostedCopyTelemetry::default(),
+            capture,
+            direct_frame: Vec::new(),
+            previous_direct_frame: Vec::new(),
+            direct_resource_changed: true,
+            visual_changed: true,
         }
+    }
+
+    fn set_capture(&mut self, capture: bool) {
+        self.capture = capture;
+        self.operations.clear();
+        self.copy_telemetry = HostedCopyTelemetry::default();
+        self.direct_frame.clear();
+        self.previous_direct_frame.clear();
+        self.direct_resource_changed = true;
+        self.visual_changed = true;
     }
 
     fn push(&mut self, operation: HostedSceneOperation) -> RfvpResult<()> {
         self.finish()?;
+        if !self.capture {
+            return Ok(());
+        }
         if self.operations.len() >= self.limits.max_scene_operations {
             return Err(RfvpError::CapacityExceeded);
         }
@@ -924,12 +1011,35 @@ impl RecordingRenderer {
         core::mem::take(&mut self.copy_telemetry)
     }
 
+    fn take_visual_changed(&mut self) -> bool {
+        core::mem::take(&mut self.visual_changed)
+    }
+
+    fn push_direct(&mut self, command: DirectFrameCommand) -> RfvpResult<()> {
+        self.finish()?;
+        self.direct_frame.push(command);
+        Ok(())
+    }
+
+    fn finish_direct_frame(&mut self) {
+        let changed = self.direct_resource_changed
+            || self.direct_frame.as_slice() != self.previous_direct_frame.as_slice();
+        core::mem::swap(&mut self.direct_frame, &mut self.previous_direct_frame);
+        self.direct_frame.clear();
+        self.direct_resource_changed = false;
+        self.visual_changed = changed;
+    }
+
     fn reset_resources(&mut self) {
         self.texture_bytes = 0;
         self.operations.clear();
         self.textures.clear();
         self.failure = None;
         self.copy_telemetry = HostedCopyTelemetry::default();
+        self.direct_frame.clear();
+        self.previous_direct_frame.clear();
+        self.direct_resource_changed = true;
+        self.visual_changed = true;
     }
 
     fn reserve_texture_bytes(&mut self, additional: usize) -> RfvpResult<()> {
@@ -954,6 +1064,19 @@ impl RfvpRenderer for RecordingRenderer {
     ) -> RfvpResult<()> {
         self.finish()?;
         validate_texture_desc(desc)?;
+        if !self.capture {
+            if let Some(pixels) = pixels.as_ref() {
+                validate_texture_pixels(desc, pixels.len())?;
+            }
+            if let Some((_, known_desc)) = self.textures.iter_mut().find(|(known, _)| *known == id)
+            {
+                *known_desc = desc;
+            } else {
+                self.textures.push((id, desc));
+            }
+            self.direct_resource_changed = true;
+            return Ok(());
+        }
         let pixels = pixels
             .map(|pixels| {
                 let byte_len = pixels.len();
@@ -1044,6 +1167,11 @@ impl RfvpRenderer for RecordingRenderer {
         {
             return Err(RfvpError::InvalidArgument);
         }
+        if !self.capture {
+            validate_texture_region(desc, rect, pixels.len())?;
+            self.direct_resource_changed = true;
+            return Ok(());
+        }
         let byte_len = pixels.len();
         validate_texture_region(desc, rect, byte_len)?;
         self.reserve_texture_bytes(byte_len)?;
@@ -1092,33 +1220,62 @@ impl RfvpRenderer for RecordingRenderer {
             return;
         }
         self.textures.retain(|(known, _)| *known != id);
+        if !self.capture {
+            self.direct_resource_changed = true;
+        }
     }
 
     fn begin_frame(&mut self, width: u32, height: u32, clear: Option<ColorRgba>) -> RfvpResult<()> {
         if width == 0 || height == 0 {
             return Err(RfvpError::InvalidArgument);
         }
-        self.push(HostedSceneOperation::BeginFrame {
-            width,
-            height,
-            clear,
-        })
+        if self.capture {
+            self.push(HostedSceneOperation::BeginFrame {
+                width,
+                height,
+                clear,
+            })
+        } else {
+            self.push_direct(DirectFrameCommand::BeginFrame {
+                width,
+                height,
+                clear,
+            })
+        }
     }
 
     fn draw_sprite(&mut self, command: &DrawSpriteCommand) -> RfvpResult<()> {
-        self.push(HostedSceneOperation::DrawSprite(*command))
+        if self.capture {
+            self.push(HostedSceneOperation::DrawSprite(*command))
+        } else {
+            self.push_direct(DirectFrameCommand::DrawSprite(*command))
+        }
     }
 
     fn draw_solid(&mut self, command: &DrawSolidCommand) -> RfvpResult<()> {
-        self.push(HostedSceneOperation::DrawSolid(*command))
+        if self.capture {
+            self.push(HostedSceneOperation::DrawSolid(*command))
+        } else {
+            self.push_direct(DirectFrameCommand::DrawSolid(*command))
+        }
     }
 
     fn end_frame(&mut self) -> RfvpResult<()> {
-        self.push(HostedSceneOperation::EndFrame)
+        if self.capture {
+            self.push(HostedSceneOperation::EndFrame)
+        } else {
+            self.push_direct(DirectFrameCommand::EndFrame)
+        }
     }
 
     fn present(&mut self) -> RfvpResult<()> {
-        self.push(HostedSceneOperation::Present)
+        if self.capture {
+            self.push(HostedSceneOperation::Present)
+        } else {
+            self.push_direct(DirectFrameCommand::Present)?;
+            self.finish_direct_frame();
+            Ok(())
+        }
     }
 }
 

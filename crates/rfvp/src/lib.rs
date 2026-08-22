@@ -916,8 +916,9 @@ pub mod script;
 #[cfg(all(not(feature = "no_std"), feature = "soft-render-desktop"))]
 pub mod soft_host;
 #[cfg(all(
-    not(feature = "no_std"),
+    any(not(feature = "no_std"), feature = "hosted"),
     any(
+        feature = "hosted",
         feature = "soft-render-core",
         feature = "soft-render",
         feature = "soft-render-desktop"
@@ -1140,10 +1141,7 @@ pub unsafe extern "C" fn rfvp_pump_step(handle: *mut RfvpPumpHandle, timeout_ms:
 ))]
 #[cfg(feature = "gpu-render")]
 #[no_mangle]
-pub unsafe extern "C" fn rfvp_pump_set_text_hidpi(
-    handle: *mut RfvpPumpHandle,
-    enabled: i32,
-) {
+pub unsafe extern "C" fn rfvp_pump_set_text_hidpi(handle: *mut RfvpPumpHandle, enabled: i32) {
     if handle.is_null() {
         return;
     }

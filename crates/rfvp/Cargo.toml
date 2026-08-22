@@ -84,6 +84,8 @@ uuid = { version = "1.19.0", features = ["js"], optional = true }
 wmv-decoder = { path = "../na_wmv_player", optional = true, default-features = false }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder", optional = true, default-features = false }
 crossbeam-channel = { version = "0.5", optional = true }
+astra-emu-family-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e", optional = true }
+astra-byte-source = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3f9a771acee0c668162666bf52c046f93e97b94e", optional = true }
 
 
 
@@ -107,7 +109,7 @@ default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "r
 # A standard-library embedding of the portable RFVP core.  This selects the
 # host-neutral resource/render/audio modules without enabling the upstream
 # window or GPU product hosts.
-hosted = ["no_std", "dep:bincode", "dep:sha2"]
+hosted = ["no_std", "dep:image", "dep:bincode", "dep:sha2", "dep:astra-emu-family-api", "dep:astra-byte-source"]
 
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:
