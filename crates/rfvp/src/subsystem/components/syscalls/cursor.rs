@@ -8,6 +8,7 @@ use alloc::{
 };
 use anyhow::Result;
 
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::get_int_var;
 use crate::script::Variant;
 use crate::subsystem::world::GameData;
@@ -46,6 +47,9 @@ impl Syscaller for CursorMove {
         };
 
         let force = !get_var!(args, 2).is_nil();
+        #[cfg(feature = "hosted")]
+        let allow = game_data.hosted_global_int(15) == 1;
+        #[cfg(not(feature = "hosted"))]
         let allow = get_int_var(15) == 1;
 
         if allow || force {

@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use super::error::{RfvpError, RfvpResult};
 
@@ -105,16 +105,76 @@ pub struct DrawSolidCommand {
     pub scissor: Option<RectI32>,
 }
 
+/// Pixel storage submitted to the renderer. Callers that already own or share
+/// a generation allocation must use `Owned`; `Borrowed` is reserved for APIs
+/// that cannot transfer storage and is reported as a copy by hosted capture.
+#[derive(Debug)]
+pub enum HostedPixelBuffer {
+    Bytes(Vec<u8>),
+    SharedImage(Arc<crate::DynamicImage>),
+}
+
+impl HostedPixelBuffer {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes)
+    }
+
+    pub fn from_shared_image(image: Arc<crate::DynamicImage>) -> Self {
+        Self::SharedImage(image)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::SharedImage(image) => match image.as_ref() {
+                crate::DynamicImage::ImageRgba8(image) => image.as_raw(),
+                crate::DynamicImage::ImageLumaA8(image) => image.as_raw(),
+            },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+#[derive(Debug)]
+pub enum PixelBuffer<'a> {
+    Borrowed(&'a [u8]),
+    Owned(HostedPixelBuffer),
+}
+
+impl PixelBuffer<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(bytes) => bytes.len(),
+            Self::Owned(bytes) => bytes.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 pub trait RfvpRenderer {
     fn create_texture(
         &mut self,
         id: TextureId,
         desc: TextureDesc,
-        pixels: Option<&[u8]>,
+        pixels: Option<PixelBuffer<'_>>,
     ) -> RfvpResult<()>;
 
-    fn update_texture(&mut self, id: TextureId, rect: TextureRect, pixels: &[u8])
-        -> RfvpResult<()>;
+    fn update_texture(
+        &mut self,
+        id: TextureId,
+        rect: TextureRect,
+        pixels: PixelBuffer<'_>,
+    ) -> RfvpResult<()>;
 
     fn destroy_texture(&mut self, id: TextureId);
 
@@ -228,6 +288,7 @@ pub struct DrawGlyphCmd {
 pub enum RenderCommand {
     DrawImage(DrawImageCmd),
     DrawGlyph(DrawGlyphCmd),
+    DrawSolid(DrawSolidCommand),
     SetClip(RectI16),
     ClearClip,
 }
@@ -257,7 +318,7 @@ pub trait TextureBackend {
         &mut self,
         handle: TextureHandle,
         desc: PortableTextureDesc,
-        data: &[u8],
+        data: PixelBuffer<'_>,
     ) -> Result<(), Self::Error>;
 
     fn destroy_texture(&mut self, handle: TextureHandle);
@@ -348,7 +409,7 @@ impl<T: RfvpRenderer> TextureBackend for T {
         &mut self,
         handle: TextureHandle,
         desc: PortableTextureDesc,
-        data: &[u8],
+        data: PixelBuffer<'_>,
     ) -> Result<(), Self::Error> {
         RfvpRenderer::create_texture(
             self,
@@ -436,6 +497,11 @@ impl<T: RfvpRenderer> RenderBackend for T {
                             scissor,
                         },
                     )?;
+                }
+                RenderCommand::DrawSolid(cmd) => {
+                    let mut cmd = cmd;
+                    cmd.scissor = cmd.scissor.or(clip.map(command_rect_to_host));
+                    RfvpRenderer::draw_solid(self, &cmd)?;
                 }
             }
         }

@@ -7,11 +7,12 @@ use alloc::{
     vec::Vec,
 };
 use anyhow::{bail, Context, Result};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_player::{BgmPlayerSnapshotV1, SePlayerSnapshotV1};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::motion_manager::MotionManagerSnapshotV1;
@@ -22,7 +23,7 @@ const SAVE_STATE_MAGIC: [u8; 4] = *b"RFVS";
 const SAVE_STATE_FOOTER_LEN: usize = 8; // u32 payload_len + 4-byte magic
 const MAX_STATE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 fn bincode_opts() -> impl bincode::Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -49,6 +50,16 @@ pub struct SaveStateSnapshotV1 {
 
 impl SaveStateSnapshotV1 {
     pub fn capture(game_data: &mut GameData) -> Self {
+        #[cfg(feature = "hosted")]
+        let globals_non_volatile = {
+            let globals = game_data.capture_hosted_globals();
+            globals
+                .values
+                .into_iter()
+                .take(globals.non_volatile_count as usize)
+                .collect()
+        };
+        #[cfg(not(feature = "hosted"))]
         let globals_non_volatile = GLOBAL.lock().unwrap().snapshot_non_volatile();
 
         let vm = match game_data.save_manager.take_pending_vm_snapshot() {
@@ -68,6 +79,27 @@ impl SaveStateSnapshotV1 {
             },
             globals_non_volatile,
             vm,
+        }
+    }
+
+    /// Captures a coherent hosted checkpoint from the live VM rather than the
+    /// deferred user-save queue.  The host owns persistence and serialization.
+    #[cfg(feature = "hosted")]
+    pub fn capture_hosted(game_data: &GameData, vm: &ThreadManager) -> Self {
+        let globals = game_data.capture_hosted_globals();
+        SaveStateSnapshotV1 {
+            version: 1,
+            motion: game_data.motion_manager.capture_snapshot_v1(),
+            audio: AudioSnapshotV1 {
+                bgm: game_data.bgm_player_ref().capture_snapshot_v1(),
+                se: game_data.se_player_ref().capture_snapshot_v1(),
+            },
+            globals_non_volatile: globals
+                .values
+                .into_iter()
+                .take(globals.non_volatile_count as usize)
+                .collect(),
+            vm: vm.capture_snapshot_v1(),
         }
     }
 
@@ -92,9 +124,28 @@ impl SaveStateSnapshotV1 {
             .apply_snapshot_v1(&self.audio.se, vfs)
             .context("apply SePlayerSnapshotV1")?;
 
+        #[cfg(not(feature = "hosted"))]
         {
             let mut g = GLOBAL.lock().unwrap();
             g.restore_non_volatile(&self.globals_non_volatile);
+        }
+
+        #[cfg(feature = "hosted")]
+        {
+            let globals = game_data.capture_hosted_globals();
+            let mut values = globals.values;
+            if self.globals_non_volatile.len() != globals.non_volatile_count as usize {
+                bail!("hosted snapshot global count is incompatible with this session");
+            }
+            values[..self.globals_non_volatile.len()].clone_from_slice(&self.globals_non_volatile);
+            let snapshot = crate::script::global::HostedGlobalSnapshot {
+                non_volatile_count: globals.non_volatile_count,
+                volatile_count: globals.volatile_count,
+                values,
+            };
+            if !game_data.restore_hosted_globals(&snapshot) {
+                bail!("hosted snapshot global state is incompatible with this session");
+            }
         }
 
         tm.apply_snapshot_v1(&self.vm);
@@ -103,13 +154,13 @@ impl SaveStateSnapshotV1 {
 }
 
 pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> Result<()> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = (out, snap);
         bail!("SaveStateSnapshotV1 serialization requires the std desktop bincode adapter");
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         let payload = bincode_opts()
             .serialize(snap)
@@ -135,13 +186,13 @@ pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> R
 }
 
 pub fn try_decode_state_chunk_v1(file_bytes: &[u8]) -> Result<Option<SaveStateSnapshotV1>> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = file_bytes;
         return Ok(None);
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         if file_bytes.len() < SAVE_STATE_FOOTER_LEN {
             return Ok(None);

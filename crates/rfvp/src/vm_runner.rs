@@ -1,3 +1,5 @@
+#[cfg(feature = "hosted")]
+use alloc::collections::VecDeque;
 use anyhow::Result;
 #[cfg(not(feature = "no_std"))]
 use std::fs;
@@ -29,6 +31,26 @@ macro_rules! uefi_vm_stage {
 #[derive(Debug)]
 pub struct VmRunner {
     tm: ThreadManager,
+    #[cfg(feature = "hosted")]
+    trace: HostedTraceRing,
+}
+
+/// Compact, allocation-free-at-steady-state evidence for the last opcodes
+/// executed by a session. Shipping sessions leave the ring disabled, so the
+/// dispatch path performs neither an extra bytecode read nor a trace write.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedVmTraceRecord {
+    pub context_id: u32,
+    pub program_counter: u32,
+    pub opcode: u8,
+}
+
+#[cfg(feature = "hosted")]
+#[derive(Debug, Default)]
+struct HostedTraceRing {
+    capacity: usize,
+    records: VecDeque<HostedVmTraceRecord>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,7 +64,11 @@ pub struct VmTickReport {
 
 impl VmRunner {
     pub fn new(tm: ThreadManager) -> Self {
-        Self { tm }
+        Self {
+            tm,
+            #[cfg(feature = "hosted")]
+            trace: HostedTraceRing::default(),
+        }
     }
 
     pub fn thread_manager(&self) -> &ThreadManager {
@@ -51,6 +77,22 @@ impl VmRunner {
 
     pub fn thread_manager_mut(&mut self) -> &mut ThreadManager {
         &mut self.tm
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn set_hosted_trace_capacity(&mut self, capacity: usize) -> Result<()> {
+        const MAX_HOSTED_TRACE_RECORDS: usize = 65_536;
+        if capacity > MAX_HOSTED_TRACE_RECORDS {
+            anyhow::bail!("hosted trace capacity exceeds limit");
+        }
+        self.trace.capacity = capacity;
+        self.trace.records = VecDeque::with_capacity(capacity);
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn hosted_trace(&self) -> Vec<HostedVmTraceRecord> {
+        self.trace.records.iter().copied().collect()
     }
 
     pub fn start_main(&mut self, entry_point: u32) {
@@ -345,6 +387,8 @@ impl VmRunner {
         );
         while !self.tm.get_context_should_break(tid) {
             uefi_vm_stage!("[UEFI] run_one_context before dispatch tid={}", tid);
+            #[cfg(feature = "hosted")]
+            self.record_hosted_opcode(tid, parser)?;
             let result = self.tm.context_dispatch_opcode(tid, game, parser);
             uefi_vm_stage!("[UEFI] run_one_context after dispatch tid={}", tid);
 
@@ -418,6 +462,25 @@ impl VmRunner {
             }
         }
 
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    fn record_hosted_opcode(&mut self, tid: u32, parser: &Parser) -> Result<()> {
+        if self.trace.capacity == 0 {
+            return Ok(());
+        }
+        let program_counter = self.tm.contexts[tid as usize].get_pc();
+        let opcode = parser.read_u8(program_counter)?;
+        if self.trace.records.len() == self.trace.capacity {
+            self.trace.records.pop_front();
+        }
+        self.trace.records.push_back(HostedVmTraceRecord {
+            context_id: tid,
+            program_counter: u32::try_from(program_counter)
+                .map_err(|_| anyhow::anyhow!("hosted program counter exceeds u32"))?,
+            opcode,
+        });
         Ok(())
     }
 }

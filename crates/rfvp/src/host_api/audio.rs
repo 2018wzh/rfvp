@@ -1,6 +1,8 @@
 use super::error::RfvpResult;
 use alloc::vec::Vec;
 
+use super::RfvpError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioStreamId(pub u32);
 
@@ -76,6 +78,15 @@ impl Default for AudioParams {
 }
 
 pub trait RfvpAudio {
+    fn load_resource(
+        &mut self,
+        _id: AudioStreamId,
+        _kind: EncodedAudioKind,
+        _resource_uri: &str,
+    ) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
     fn load_encoded(
         &mut self,
         id: AudioStreamId,
@@ -83,11 +94,33 @@ pub trait RfvpAudio {
         bytes: &[u8],
     ) -> RfvpResult<()>;
 
+    /// Transfers an already-owned encoded payload to the host. Backends that
+    /// retain payloads should override this method so the allocation crosses
+    /// the hosted boundary exactly once.
+    fn load_encoded_owned(
+        &mut self,
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        bytes: Vec<u8>,
+    ) -> RfvpResult<()> {
+        self.load_encoded(id, kind, &bytes)
+    }
+
     fn create_stream(&mut self, id: AudioStreamId, desc: AudioStreamDesc) -> RfvpResult<()>;
 
     fn submit_i16(&mut self, id: AudioStreamId, samples: &[i16]) -> RfvpResult<()>;
 
+    /// Transfers an already-owned PCM block to the host. The default keeps
+    /// existing backends source-compatible; retaining hosts must override it.
+    fn submit_i16_owned(&mut self, id: AudioStreamId, samples: Vec<i16>) -> RfvpResult<()> {
+        self.submit_i16(id, &samples)
+    }
+
     fn submit_f32(&mut self, id: AudioStreamId, samples: &[f32]) -> RfvpResult<()>;
+
+    fn submit_f32_owned(&mut self, id: AudioStreamId, samples: Vec<f32>) -> RfvpResult<()> {
+        self.submit_f32(id, &samples)
+    }
 
     fn play(&mut self, id: AudioStreamId, params: AudioParams, fade_in_ms: u32) -> RfvpResult<()>;
 

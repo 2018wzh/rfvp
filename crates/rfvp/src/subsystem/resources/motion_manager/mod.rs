@@ -35,8 +35,8 @@ use super::parts_manager::PartsManager;
 use super::parts_manager::PartsManagerSnapshotV1;
 use super::prim::{PrimManager, INVAILD_PRIM_HANDLE};
 use super::prim::{PrimManagerSnapshotV1, PrimSnapshotV1};
-use super::text_manager::{TextManager, TextSlotSurfaceUpdate};
 use super::text_manager::TextManagerSnapshotV1;
+use super::text_manager::{TextManager, TextSlotSurfaceUpdate};
 use crate::subsystem::resources::color_manager::ColorManager;
 use crate::subsystem::resources::prim::{Prim, PrimType};
 use anyhow::{bail, Result};
@@ -583,7 +583,7 @@ impl MotionManager {
             Err(_) => return Ok(()),
         };
 
-        if let Some(dest) = texture.get_texture_mut().as_mut() {
+        if let Some(dest) = texture.get_texture_mut() {
             let src_x = 0;
             let src_y = 0;
             let src_w = parts.get_width() as u32;
@@ -1082,17 +1082,16 @@ impl MotionManager {
                 } else {
                     let (text_manager, textures) = (&self.text_manager, &mut self.textures);
                     if let Some(rgba) = text_manager.slot_rgba_bytes(slot) {
-                        textures[graph_id as usize]
-                            .load_text_from_buff_ref_with_display_size(
-                                rgba,
-                                info.width,
-                                info.height,
-                                info.display_width,
-                                info.display_height,
-                                info.origin_x_px,
-                                info.origin_y_px,
-                                info.raster_scale,
-                            )?;
+                        textures[graph_id as usize].load_text_from_buff_ref_with_display_size(
+                            rgba,
+                            info.width,
+                            info.height,
+                            info.display_width,
+                            info.display_height,
+                            info.origin_x_px,
+                            info.origin_y_px,
+                            info.raster_scale,
+                        )?;
                     } else {
                         return Ok(());
                     }
@@ -1102,7 +1101,6 @@ impl MotionManager {
         }
         Ok(())
     }
-
 }
 
 impl MotionManager {
@@ -1191,17 +1189,21 @@ pub struct MotionManagerSnapshotV1 {
     pub gaiji_manager: GaijiManagerSnapshotV1,
     pub dissolve1: Dissolve1SnapshotV1,
     pub dissolve2: Dissolve2SnapshotV1,
+    pub alpha_motions: AlphaMotionContainer,
+    pub move_motions: MoveMotionContainer,
+    pub rotation_motions: RotationMotionContainer,
+    pub scale_motions: ScaleMotionContainer,
+    pub z_motions: ZMotionContainer,
+    pub v3d_motions: V3dMotionContainer,
+    pub snow_motions: SnowMotionContainer,
+    pub sprite_animations: SpriteAnimContainer,
+    pub lip_motions: LipMotionContainer,
 }
 
 impl MotionManager {
     pub fn capture_snapshot_v1(&self) -> MotionManagerSnapshotV1 {
         let mut textures: Vec<GraphBuffSnapshotV1> = Vec::new();
         for (id, gb) in self.textures.iter().enumerate() {
-            // Text surfaces are rebuilt from TextManager state after load. Omitting the reserved
-            // text GraphBuff range avoids embedding large HiDPI RGBA surfaces in save states.
-            if (4064..=4095).contains(&id) {
-                continue;
-            }
             if gb.texture_ready || gb.texture.is_some() || !gb.texture_path.is_empty() {
                 textures.push(gb.capture_snapshot_with_id(id as u16));
             }
@@ -1238,6 +1240,15 @@ impl MotionManager {
             gaiji_manager: self.gaiji_manager.capture_snapshot_v1(),
             dissolve1,
             dissolve2,
+            alpha_motions: self.alpha_motion_container.clone(),
+            move_motions: self.move_motion_container.clone(),
+            rotation_motions: self.rotation_motion_container.clone(),
+            scale_motions: self.scale_motion_container.clone(),
+            z_motions: self.z_motion_container.clone(),
+            v3d_motions: self.v3d_motion_container.clone(),
+            snow_motions: self.snow_motion_container.clone(),
+            sprite_animations: self.sprite_anim_container.clone(),
+            lip_motions: self.lip_motion_container.clone(),
         }
     }
 
@@ -1297,16 +1308,15 @@ impl MotionManager {
                 pending_fade_out: snap.dissolve2.pending_fade_out,
             });
 
-        // Stop time-based motions on load. Scene state (prims/textures/text) is already restored,
-        // but resuming in-flight motions without accurate timestamps causes more harm than good.
-        self.alpha_motion_container = AlphaMotionContainer::new();
-        self.move_motion_container = MoveMotionContainer::new();
-        self.rotation_motion_container = RotationMotionContainer::new();
-        self.scale_motion_container = ScaleMotionContainer::new();
-        self.z_motion_container = ZMotionContainer::new();
-        self.v3d_motion_container = V3dMotionContainer::new();
-        self.sprite_anim_container = SpriteAnimContainer::new();
-        self.snow_motion_container = SnowMotionContainer::new();
+        self.alpha_motion_container = snap.alpha_motions.clone();
+        self.move_motion_container = snap.move_motions.clone();
+        self.rotation_motion_container = snap.rotation_motions.clone();
+        self.scale_motion_container = snap.scale_motions.clone();
+        self.z_motion_container = snap.z_motions.clone();
+        self.v3d_motion_container = snap.v3d_motions.clone();
+        self.sprite_anim_container = snap.sprite_animations.clone();
+        self.snow_motion_container = snap.snow_motions.clone();
+        self.lip_motion_container = snap.lip_motions.clone();
 
         Ok(())
     }

@@ -33,8 +33,14 @@ pub fn audio_load(game_data: &mut GameData, channel: &Variant, path: &Variant) -
     match path {
         Variant::String(path) | Variant::ConstString(path, _) => {
             let path = path.clone();
-            let (vfs, bgm_player) = (&game_data.vfs, &mut game_data.bgm_player);
-            if let Err(e) = bgm_player.load_named(channel, path.clone(), vfs) {
+            #[cfg(feature = "no_std")]
+            let result = game_data.bgm_player_mut().load_named(channel, path.clone());
+            #[cfg(not(feature = "no_std"))]
+            let result = {
+                let (vfs, bgm_player) = (&game_data.vfs, &mut game_data.bgm_player);
+                bgm_player.load_named(channel, path.clone(), vfs)
+            };
+            if let Err(e) = result {
                 log::error!("audio_load: {:?}", e);
             }
             return Ok(Variant::Nil);
@@ -292,11 +298,16 @@ pub fn sound_load(game_data: &mut GameData, channel: &Variant, path: &Variant) -
     match path {
         Variant::String(path) | Variant::ConstString(path, _) => {
             let path = path.clone();
-            let data = game_data.vfs_load_file(&path)?;
-            if let Err(e) = game_data
-                .se_player_mut()
-                .load_named(channel, path.clone(), data)
-            {
+            #[cfg(feature = "no_std")]
+            let result = game_data.se_player_mut().load_named(channel, path.clone());
+            #[cfg(not(feature = "no_std"))]
+            let result = {
+                let data = game_data.vfs_load_file(&path)?;
+                game_data
+                    .se_player_mut()
+                    .load_named(channel, path.clone(), data)
+            };
+            if let Err(e) = result {
                 log::error!("sound_load: {:?}", e);
             }
             return Ok(Variant::Nil);

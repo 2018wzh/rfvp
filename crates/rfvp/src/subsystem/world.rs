@@ -22,6 +22,8 @@ use crate::subsystem::components::syscalls::utils::{
     nullsub_2, Debmess, DissolveWait, ExitDialog, TitleMenu, UnimplementedNamed,
 };
 
+#[cfg(feature = "hosted")]
+use crate::script::global::Global;
 use crate::script::{Variant, VmSyscall};
 use crate::subsystem::components::syscalls::color::ColorSet;
 use crate::subsystem::components::syscalls::flag::{FlagGet, FlagSet};
@@ -134,6 +136,13 @@ pub trait World {
 }
 
 pub struct GameData {
+    #[cfg(feature = "hosted")]
+    globals: Global,
+    /// Text printed during the current hosted step. The provider drains this
+    /// queue synchronously for the translation Hook and never exposes it in a
+    /// presentation or persistence DTO.
+    #[cfg(feature = "hosted")]
+    hosted_text_events: Vec<HostedTextEvent>,
     pub(crate) vfs: Vfs,
     pub(crate) thread_wrapper: ThreadWrapper,
     pub(crate) history_manager: HistoryManager,
@@ -177,6 +186,16 @@ pub struct GameData {
     pub(crate) debug_vm: crate::debug_ui::vm_snapshot::VmSnapshot,
 }
 
+/// Host-neutral text emitted by a script print operation. The embedding owns
+/// redaction, lease and persistence policy; RFVP only preserves the semantic
+/// slot and bytes produced by its own session.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostedTextEvent {
+    pub slot: u8,
+    pub text: String,
+}
+
 impl GameData {
     /// Initialize a `GameData` at `dst` with the same values as `GameData::default()`,
     /// but without creating a large temporary on the stack.
@@ -191,6 +210,10 @@ impl GameData {
         uefi_game_data_stage!("[UEFI] GameData init after AudioManager");
 
         uefi_game_data_stage!("[UEFI] GameData init before vfs");
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).globals).write(Global::new());
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).hosted_text_events).write(Vec::new());
         ptr::addr_of_mut!((*dst).vfs).write(Vfs::default());
         uefi_game_data_stage!("[UEFI] GameData init after vfs");
         uefi_game_data_stage!("[UEFI] GameData init before thread_wrapper");
@@ -257,6 +280,10 @@ impl Default for GameData {
         let audio_manager = Arc::new(AudioManager::new());
 
         Self {
+            #[cfg(feature = "hosted")]
+            globals: Global::new(),
+            #[cfg(feature = "hosted")]
+            hosted_text_events: Vec::new(),
             vfs: Vfs::default(),
             thread_wrapper: ThreadWrapper::default(),
             history_manager: HistoryManager::default(),
@@ -300,6 +327,44 @@ impl Default for GameData {
 }
 
 impl GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) fn init_hosted_globals(&mut self, non_volatile: u16, volatile: u16) {
+        self.globals.init_with(non_volatile, volatile);
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn hosted_global_int(&self, key: u16) -> i32 {
+        self.globals.get_int_var(key)
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn capture_hosted_globals(&self) -> crate::script::global::HostedGlobalSnapshot {
+        self.globals.capture_hosted_snapshot()
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn restore_hosted_globals(
+        &mut self,
+        snapshot: &crate::script::global::HostedGlobalSnapshot,
+    ) -> bool {
+        self.globals.restore_hosted_snapshot(snapshot)
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn record_hosted_text(&mut self, slot: i32, text: &str) -> bool {
+        debug_assert!((0..32).contains(&slot));
+        self.hosted_text_events.push(HostedTextEvent {
+            slot: slot as u8,
+            text: text.to_owned(),
+        });
+        true
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn take_hosted_text_events(&mut self) -> Vec<HostedTextEvent> {
+        core::mem::take(&mut self.hosted_text_events)
+    }
+
     /// retrieves the timers resource from the resources.
     pub fn time_ref(&self) -> &Time {
         &self.time
@@ -586,6 +651,11 @@ impl VmSyscall for GameData {
             |syscall| syscall.call(self, args),
         );
         result
+    }
+
+    #[cfg(feature = "hosted")]
+    fn with_globals<R>(&mut self, callback: impl FnOnce(&mut Global) -> R) -> R {
+        callback(&mut self.globals)
     }
 }
 

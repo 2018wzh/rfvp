@@ -6,8 +6,10 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ThreadRequest {
     /// start a new thread with the given id and address
     Start(u32, u32),
@@ -36,7 +38,25 @@ pub struct ThreadWrapper {
     requests: VecDeque<ThreadRequest>,
 }
 
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadWrapperSnapshotV1 {
+    requests: VecDeque<ThreadRequest>,
+}
+
 impl ThreadWrapper {
+    #[cfg(feature = "hosted")]
+    pub fn capture_snapshot_v1(&self) -> ThreadWrapperSnapshotV1 {
+        ThreadWrapperSnapshotV1 {
+            requests: self.requests.clone(),
+        }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn apply_snapshot_v1(&mut self, snapshot: ThreadWrapperSnapshotV1) {
+        self.requests = snapshot.requests;
+    }
+
     pub fn new() -> Self {
         Default::default()
     }

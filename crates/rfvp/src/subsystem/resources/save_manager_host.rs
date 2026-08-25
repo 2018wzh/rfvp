@@ -7,7 +7,11 @@ use anyhow::{anyhow, Result};
 
 use crate::script::parser::Nls;
 use crate::subsystem::resources::thread_manager::ThreadManagerSnapshotV1;
+use crate::subsystem::save_state::{append_state_chunk_v1, SaveStateSnapshotV1};
 use std::path::PathBuf;
+
+const HOSTED_SAVE_MAGIC: [u8; 4] = *b"RFV9";
+const HOSTED_SAVE_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveDataFunction {
@@ -75,6 +79,9 @@ impl SaveItem {
     }
 
     pub fn load_from_mem(buf: &[u8], _nls: Nls) -> Result<Self> {
+        if buf.starts_with(&HOSTED_SAVE_MAGIC) {
+            return decode_hosted_save(buf);
+        }
         let text = core::str::from_utf8(buf).unwrap_or_default();
         let mut item = SaveItem::default();
         for line in text.lines() {
@@ -107,6 +114,14 @@ pub struct SaveManager {
     load_request: Option<u32>,
     slots: Vec<Option<SaveItem>>,
     slot_bytes: Vec<Option<Vec<u8>>>,
+    file_operations: Vec<HostedSaveFileOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedSaveFileOperation {
+    Refresh,
+    Remove { slot: u32 },
+    Copy { source: u32, destination: u32 },
 }
 
 impl Default for SaveManager {
@@ -137,6 +152,7 @@ impl SaveManager {
             load_request: None,
             slots,
             slot_bytes,
+            file_operations: Vec::new(),
         }
     }
 
@@ -271,6 +287,8 @@ impl SaveManager {
         if let Some(s) = self.slot_bytes.get_mut(slot as usize) {
             *s = None;
         }
+        self.file_operations
+            .push(HostedSaveFileOperation::Remove { slot });
     }
 
     pub fn copy_savedata(&mut self, src: u32, dst: u32) -> Result<()> {
@@ -281,11 +299,25 @@ impl SaveManager {
         }
         self.slots[dst_idx] = self.slots[src_idx].clone();
         self.slot_bytes[dst_idx] = self.slot_bytes[src_idx].clone();
+        self.file_operations.push(HostedSaveFileOperation::Copy {
+            source: src,
+            destination: dst,
+        });
         Ok(())
     }
 
     pub fn refresh_all_savedata(&mut self, _nls: Nls) -> Result<()> {
+        self.file_operations.push(HostedSaveFileOperation::Refresh);
         Ok(())
+    }
+
+    pub fn take_file_operations(&mut self) -> Vec<HostedSaveFileOperation> {
+        core::mem::take(&mut self.file_operations)
+    }
+
+    pub fn clear_cached_slots(&mut self) {
+        self.slots.fill(None);
+        self.slot_bytes.fill(None);
     }
 
     pub fn load_savedata(&mut self, slot: u32, nls: Nls) -> Result<()> {
@@ -423,7 +455,97 @@ impl SaveManager {
         Ok(())
     }
 
+    pub fn build_and_store_hosted_save(
+        &mut self,
+        slot: u32,
+        thumb: Vec<u8>,
+        snapshot: &SaveStateSnapshotV1,
+        nls: Nls,
+    ) -> Result<Vec<u8>> {
+        let idx = slot as usize;
+        if idx >= self.slots.len() {
+            return Err(anyhow!("save slot out of range"));
+        }
+        let item = SaveItem {
+            title: self.current_title.clone(),
+            scene_title: self.current_scene_title.clone(),
+            script_content: self.current_script_content.clone(),
+            thumb,
+            ..SaveItem::default()
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HOSTED_SAVE_MAGIC);
+        bytes.extend_from_slice(&HOSTED_SAVE_VERSION.to_le_bytes());
+        push_field(&mut bytes, item.title.as_bytes())?;
+        push_field(&mut bytes, item.scene_title.as_bytes())?;
+        push_field(&mut bytes, item.script_content.as_bytes())?;
+        push_field(&mut bytes, &item.thumb)?;
+        append_state_chunk_v1(&mut bytes, snapshot)?;
+        self.slots[idx] = Some(SaveItem::load_from_mem(&bytes, nls).unwrap_or(item));
+        self.slot_bytes[idx] = Some(bytes.clone());
+        self.savedata_requested = false;
+        self.savedata_prepared = true;
+        self.local_saved = Some(bytes.clone());
+        Ok(bytes)
+    }
+
     fn slot(&self, slot: u32) -> Option<&SaveItem> {
         self.slots.get(slot as usize).and_then(|s| s.as_ref())
     }
+}
+
+fn push_field(output: &mut Vec<u8>, field: &[u8]) -> Result<()> {
+    let length = u32::try_from(field.len()).map_err(|_| anyhow!("save field too large"))?;
+    output.extend_from_slice(&length.to_le_bytes());
+    output.extend_from_slice(field);
+    Ok(())
+}
+
+fn decode_hosted_save(bytes: &[u8]) -> Result<SaveItem> {
+    let mut cursor = 4usize;
+    let version = read_u16(bytes, &mut cursor)?;
+    if version != HOSTED_SAVE_VERSION {
+        return Err(anyhow!("unsupported hosted save version: {version}"));
+    }
+    let title = read_field(bytes, &mut cursor)?;
+    let scene_title = read_field(bytes, &mut cursor)?;
+    let script_content = read_field(bytes, &mut cursor)?;
+    let thumb = read_field(bytes, &mut cursor)?.to_vec();
+    Ok(SaveItem {
+        title: core::str::from_utf8(title)?.to_string(),
+        scene_title: core::str::from_utf8(scene_title)?.to_string(),
+        script_content: core::str::from_utf8(script_content)?.to_string(),
+        thumb,
+        ..SaveItem::default()
+    })
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16> {
+    let end = cursor
+        .checked_add(2)
+        .ok_or_else(|| anyhow!("save cursor overflow"))?;
+    let field = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| anyhow!("save header truncated"))?;
+    *cursor = end;
+    Ok(u16::from_le_bytes([field[0], field[1]]))
+}
+
+fn read_field<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]> {
+    let length_end = cursor
+        .checked_add(4)
+        .ok_or_else(|| anyhow!("save cursor overflow"))?;
+    let length = bytes
+        .get(*cursor..length_end)
+        .ok_or_else(|| anyhow!("save field length truncated"))?;
+    *cursor = length_end;
+    let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]) as usize;
+    let end = cursor
+        .checked_add(length)
+        .ok_or_else(|| anyhow!("save field length overflow"))?;
+    let field = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| anyhow!("save field truncated"))?;
+    *cursor = end;
+    Ok(field)
 }

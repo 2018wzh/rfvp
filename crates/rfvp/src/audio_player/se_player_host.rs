@@ -68,19 +68,23 @@ impl SePlayer {
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: crate::host_api::EncodedAudioKind::Unknown,
+            resource_uri: None,
             bytes: se,
         });
         self.loaded[slot] = true;
         Ok(())
     }
 
-    pub fn load_named(&mut self, slot: i32, name: impl Into<String>, se: Vec<u8>) -> Result<()> {
+    /// Queues a named resource for the hosted adapter to resolve under its VFS
+    /// policy. Payload bytes must not be read by the hosted core itself.
+    pub fn load_named(&mut self, slot: i32, name: impl Into<String>) -> Result<()> {
         let name = name.into();
         let slot = checked_slot(slot)?;
         self.audio_manager.push_command(AudioCommand::LoadEncoded {
             id: Self::id(slot),
             kind: encoded_kind_from_path(&name),
-            bytes: se,
+            resource_uri: Some(name.clone()),
+            bytes: Vec::new(),
         });
         self.loaded[slot] = true;
         self.names[slot] = Some(name);
@@ -118,14 +122,16 @@ impl SePlayer {
     pub fn set_volume(&mut self, slot: i32, volume: f32, _tween: Tween) {
         if let Ok(slot) = checked_slot(slot) {
             self.volumes[slot] = volume;
-            self.audio_manager.push_command(AudioCommand::SetParams {
-                id: Self::id(slot),
-                params: AudioParams {
-                    volume: self.effective_volume_for_slot(slot),
-                    pan: self.pan[slot] as f32,
-                    repeat: self.repeat[slot],
-                },
-            });
+            if self.loaded[slot] {
+                self.audio_manager.push_command(AudioCommand::SetParams {
+                    id: Self::id(slot),
+                    params: AudioParams {
+                        volume: self.effective_volume_for_slot(slot),
+                        pan: self.pan[slot] as f32,
+                        repeat: self.repeat[slot],
+                    },
+                });
+            }
         }
     }
 
@@ -151,6 +157,9 @@ impl SePlayer {
 
     pub fn stop(&mut self, slot: i32, fade_out: Tween) {
         if let Ok(slot) = checked_slot(slot) {
+            if !self.playing[slot] {
+                return;
+            }
             self.playing[slot] = false;
             self.audio_manager.push_command(AudioCommand::Stop {
                 id: Self::id(slot),
@@ -209,7 +218,7 @@ impl SePlayer {
         SePlayerSnapshotV1 { version: 1, slots }
     }
 
-    pub fn apply_snapshot_v1(&mut self, snap: &SePlayerSnapshotV1, vfs: &Vfs) -> Result<()> {
+    pub fn apply_snapshot_v1(&mut self, snap: &SePlayerSnapshotV1, _vfs: &Vfs) -> Result<()> {
         if snap.version != 1 {
             return Err(anyhow!(
                 "unsupported SePlayerSnapshotV1 version: {}",
@@ -227,8 +236,7 @@ impl SePlayer {
             self.repeat[i] = slot.repeat;
             self.pan[i] = slot.pan as f64;
             if let Some(path) = slot.path.as_ref() {
-                let bytes = vfs.read_file(path)?;
-                self.load_named(i as i32, path.clone(), bytes)?;
+                self.load_named(i as i32, path.clone())?;
             }
             if slot.playing {
                 self.play(
@@ -261,4 +269,46 @@ fn checked_slot(slot: i32) -> Result<usize> {
 
 fn duration_ms_u32(duration: crate::platform_time::Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn named_load_defers_bytes_to_the_hosted_adapter() {
+        let manager = Arc::new(AudioManager::new());
+        let mut player = SePlayer::new(Arc::clone(&manager));
+        player
+            .load_named(0, "audio/click.wav")
+            .expect("named resource is queued");
+
+        let mut commands = Vec::new();
+        manager.drain_commands(&mut commands);
+        assert!(matches!(
+            commands.as_slice(),
+            [AudioCommand::LoadEncoded {
+                resource_uri: Some(uri),
+                bytes,
+                ..
+            }] if uri == "audio/click.wav" && bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn empty_slots_do_not_emit_host_commands() {
+        let manager = Arc::new(AudioManager::new());
+        let mut player = SePlayer::new(Arc::clone(&manager));
+
+        player.set_volume(0, 0.5, Tween::default());
+        player.set_panning(1, 0.25, Tween::default());
+        player.silent_on(2, Tween::default());
+        player.stop_all(Tween::default());
+
+        let mut commands = Vec::new();
+        manager.drain_commands(&mut commands);
+        assert!(commands.is_empty());
+    }
 }

@@ -83,6 +83,8 @@ uuid = { version = "1.19.0", features = ["js"], optional = true }
 wmv-decoder = { path = "../na_wmv_player", optional = true, default-features = false }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder", optional = true, default-features = false }
 crossbeam-channel = { version = "0.5", optional = true }
+astra-emu-family-api = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "635527831e89e5ff9b87ac165b5b5532e28356c6", optional = true }
+astra-byte-source = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "635527831e89e5ff9b87ac165b5b5532e28356c6", optional = true }
 
 
 
@@ -102,6 +104,11 @@ anzu-hal = { path = "../anzu-hal", optional = true }
 [features]
 # Keep native movie support enabled by default for backward compatibility.
 default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging"]
+
+# A standard-library embedding of the portable RFVP core.  This selects the
+# host-neutral resource/render/audio modules without enabling the upstream
+# window or GPU product hosts.
+hosted = ["no_std", "dep:image", "dep:bincode", "dep:astra-emu-family-api", "dep:astra-byte-source"]
 
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:

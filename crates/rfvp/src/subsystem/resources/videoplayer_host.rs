@@ -19,8 +19,8 @@ pub enum MovieMode {
 
 #[derive(Debug, Clone)]
 pub struct HostMovieCommand {
-    pub name: String,
-    pub bytes: Vec<u8>,
+    pub resource_uri: String,
+    pub byte_len: u64,
     pub mode: MovieMode,
     pub screen_w: u32,
     pub screen_h: u32,
@@ -60,7 +60,11 @@ impl VideoPlayerManager {
         motion: &mut MotionManager,
         audio_manager: Option<Arc<AudioManager>>,
     ) -> Result<()> {
-        let name = movie_path.as_ref().as_os_str().to_string();
+        let name = movie_path
+            .as_ref()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
         self.start_from_bytes(
             &name,
             Vec::new(),
@@ -86,8 +90,37 @@ impl VideoPlayerManager {
         self.loaded = true;
         self.modal = matches!(mode, MovieMode::ModalWithAudio);
         self.pending_commands.push(HostMovieCommand {
-            name: movie_name.to_string(),
-            bytes,
+            resource_uri: movie_name.to_string(),
+            byte_len: u64::try_from(bytes.len())
+                .map_err(|_| anyhow::anyhow!("movie bytes exceed u64"))?,
+            mode,
+            screen_w,
+            screen_h,
+        });
+        Ok(())
+    }
+
+    /// Queue a host-owned VFS resource. Hosted sessions must not copy an
+    /// encoded movie into the core just to request playback.
+    pub fn start_from_resource(
+        &mut self,
+        resource_uri: &str,
+        byte_len: u64,
+        mode: MovieMode,
+        screen_w: u32,
+        screen_h: u32,
+        _motion: &mut MotionManager,
+        _audio_manager: Option<Arc<AudioManager>>,
+    ) -> Result<()> {
+        if resource_uri.is_empty() || byte_len == 0 {
+            anyhow::bail!("hosted movie resource is empty");
+        }
+        self.playing = true;
+        self.loaded = true;
+        self.modal = matches!(mode, MovieMode::ModalWithAudio);
+        self.pending_commands.push(HostMovieCommand {
+            resource_uri: resource_uri.to_string(),
+            byte_len,
             mode,
             screen_w,
             screen_h,

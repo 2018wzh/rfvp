@@ -29,13 +29,38 @@ impl Error for SoftRenderError {}
 ///
 /// The buffer is tightly packed by default. `stride` is measured in bytes and
 /// represents the number of bytes between adjacent rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SoftFramebuffer {
     width: u32,
     height: u32,
     stride: usize,
     format: PixelFormat,
-    pixels: Vec<u8>,
+    pixels: SoftPixelStorage,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SoftPixelStorage {
+    Vec(Vec<u8>),
+    #[cfg(feature = "hosted")]
+    Astra(astra_byte_source::OwnedWritableByteBuffer),
+}
+
+impl SoftPixelStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Vec(bytes) => bytes,
+            #[cfg(feature = "hosted")]
+            Self::Astra(bytes) => bytes.as_slice(),
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Vec(bytes) => bytes,
+            #[cfg(feature = "hosted")]
+            Self::Astra(bytes) => bytes.as_mut_slice(),
+        }
+    }
 }
 
 impl SoftFramebuffer {
@@ -48,8 +73,69 @@ impl SoftFramebuffer {
             height,
             stride,
             format,
-            pixels: vec![0; len],
+            pixels: SoftPixelStorage::Vec(vec![0; len]),
         })
+    }
+
+    /// Takes ownership of a host-provided framebuffer allocation without copying it.
+    pub fn from_pixels(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        pixels: Vec<u8>,
+    ) -> Result<Self, SoftRenderError> {
+        let (stride, len) = layout(width, height, format)?;
+        if pixels.len() != len {
+            return Err(SoftRenderError::DimensionsTooLarge { width, height });
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            format,
+            pixels: SoftPixelStorage::Vec(pixels),
+        })
+    }
+
+    /// Returns the original host allocation after rendering.
+    pub fn into_pixels(self) -> Vec<u8> {
+        match self.pixels {
+            SoftPixelStorage::Vec(bytes) => bytes,
+            #[cfg(feature = "hosted")]
+            SoftPixelStorage::Astra(_) => {
+                unreachable!("Astra surface allocation requested as a Vec")
+            }
+        }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn from_astra_surface(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        pixels: astra_byte_source::OwnedWritableByteBuffer,
+    ) -> Result<Self, SoftRenderError> {
+        let (stride, len) = layout(width, height, format)?;
+        if pixels.len() != len {
+            return Err(SoftRenderError::DimensionsTooLarge { width, height });
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            format,
+            pixels: SoftPixelStorage::Astra(pixels),
+        })
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn into_astra_surface(self) -> astra_byte_source::OwnedWritableByteBuffer {
+        match self.pixels {
+            SoftPixelStorage::Astra(bytes) => bytes,
+            SoftPixelStorage::Vec(_) => {
+                unreachable!("owned framebuffer requested as an Astra surface")
+            }
+        }
     }
 
     /// Resize the framebuffer and clear the backing buffer to transparent black.
@@ -59,8 +145,9 @@ impl SoftFramebuffer {
         self.width = width;
         self.height = height;
         self.stride = stride;
-        self.pixels.resize(len, 0);
-        self.pixels.fill(0);
+        let mut pixels = vec![0; len];
+        pixels.fill(0);
+        self.pixels = SoftPixelStorage::Vec(pixels);
 
         Ok(())
     }
@@ -87,12 +174,12 @@ impl SoftFramebuffer {
 
     /// Immutable view of the framebuffer bytes.
     pub fn pixels(&self) -> &[u8] {
-        &self.pixels
+        self.pixels.as_slice()
     }
 
     /// Mutable view of the framebuffer bytes.
     pub fn pixels_mut(&mut self) -> &mut [u8] {
-        &mut self.pixels
+        self.pixels.as_mut_slice()
     }
 
     /// Fill the framebuffer with a single RGBA color.
@@ -102,7 +189,11 @@ impl SoftFramebuffer {
             PixelFormat::Bgra8 => [b, g, r, a],
         };
 
-        for chunk in self.pixels.chunks_exact_mut(self.format.bytes_per_pixel()) {
+        for chunk in self
+            .pixels
+            .as_mut_slice()
+            .chunks_exact_mut(self.format.bytes_per_pixel())
+        {
             chunk.copy_from_slice(&pixel);
         }
     }

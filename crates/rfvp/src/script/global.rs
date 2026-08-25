@@ -21,6 +21,17 @@ pub struct Global {
     volatile_count: u16,
 }
 
+/// Complete per-session global state used by hosted snapshot/restore.  Unlike
+/// legacy save files this includes volatile globals because a hosted restore is
+/// an exact runtime checkpoint, not a user-facing save migration.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostedGlobalSnapshot {
+    pub non_volatile_count: u16,
+    pub volatile_count: u16,
+    pub values: Vec<Variant>,
+}
+
 impl Global {
     pub fn new() -> Self {
         Global {
@@ -119,6 +130,40 @@ impl Global {
             let key = base.saturating_add(i as u16);
             self.global_table.insert(key, vars[i].clone());
         }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn capture_hosted_snapshot(&self) -> HostedGlobalSnapshot {
+        let total = self.none_volatile_count as usize + self.volatile_count as usize;
+        let mut values = Vec::with_capacity(total);
+        for key in 0..total {
+            values.push(
+                self.global_table
+                    .get(&(key as u16))
+                    .cloned()
+                    .unwrap_or(Variant::Nil),
+            );
+        }
+        HostedGlobalSnapshot {
+            non_volatile_count: self.none_volatile_count,
+            volatile_count: self.volatile_count,
+            values,
+        }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn restore_hosted_snapshot(&mut self, snapshot: &HostedGlobalSnapshot) -> bool {
+        let total = snapshot.non_volatile_count as usize + snapshot.volatile_count as usize;
+        if snapshot.non_volatile_count != self.none_volatile_count
+            || snapshot.volatile_count != self.volatile_count
+            || snapshot.values.len() != total
+        {
+            return false;
+        }
+        for (key, value) in snapshot.values.iter().enumerate() {
+            self.global_table.insert(key as u16, value.clone());
+        }
+        true
     }
 }
 

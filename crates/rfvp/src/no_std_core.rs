@@ -1,29 +1,40 @@
+use alloc::boxed::Box;
 #[cfg(not(feature = "old_school"))]
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+#[cfg(feature = "hosted")]
+use std::io::Read;
 
+#[cfg(feature = "old_school")]
 use crate::font::Font;
+#[cfg(feature = "old_school")]
+use crate::host_api::{FatalErrorCode, PlatformCallbacks};
 use crate::host_api::{
-    FatalErrorCode, HitProxyTable, PlatformCallbacks, RfvpAudio, RfvpClock, RfvpError, RfvpEvent,
-    RfvpFile, RfvpFileInfo, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpResult,
+    HitProxyTable, RfvpAudio, RfvpClock, RfvpError, RfvpEvent, RfvpFile, RfvpFileInfo,
+    RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpResult,
 };
 use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::parser::{Nls, Parser};
+#[cfg(feature = "hosted")]
+use crate::soft_render::SoftRenderer;
 use crate::subsystem::anzu_scene::AnzuScene;
+#[cfg(feature = "hosted")]
+use crate::subsystem::resources::save_manager::{HostedSaveFileOperation, SaveItem};
 use crate::subsystem::resources::text_manager::FontEnumerator;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
+#[cfg(feature = "hosted")]
+use crate::subsystem::save_state::{try_decode_state_chunk_v1, SaveStateSnapshotV1};
 use crate::subsystem::world::GameData;
+#[cfg(feature = "hosted")]
+use crate::vm_runner::HostedVmTraceRecord;
 use crate::vm_runner::VmRunner;
 #[cfg(feature = "old_school")]
 use core_maths::CoreFloat;
 
-const MISSING_DEFAULT_FONT_MESSAGE: &str =
-    "Required font file default.ttf was not found in the game directory.";
-const INVALID_DEFAULT_FONT_MESSAGE: &str =
-    "Required font file default.ttf exists but is not a valid TrueType/OpenType font.";
 #[cfg(feature = "old_school")]
 const MISSING_OLD_SCHOOL_FONT_MESSAGE: &str =
     "Required font file defualt.tmap was not found in the game directory.";
@@ -36,6 +47,98 @@ const MISSING_OLD_SCHOOL_CONFIG_MESSAGE: &str =
 #[cfg(feature = "old_school")]
 const INVALID_OLD_SCHOOL_CONFIG_MESSAGE: &str =
     "Required old-school config file rfvp.toml is invalid: expected exactly one top-level float field, scale.";
+
+fn hosted_keycode(
+    key: crate::host_api::KeyCode,
+) -> Option<crate::subsystem::resources::input_manager::KeyCode> {
+    use crate::host_api::KeyCode as HostKeyCode;
+    use crate::subsystem::resources::input_manager::KeyCode as InputKeyCode;
+
+    Some(match key {
+        HostKeyCode::Escape => InputKeyCode::Esc,
+        HostKeyCode::Return => InputKeyCode::Enter,
+        HostKeyCode::Space => InputKeyCode::Space,
+        HostKeyCode::Tab => InputKeyCode::Tab,
+        HostKeyCode::Left => InputKeyCode::LeftArrow,
+        HostKeyCode::Right => InputKeyCode::RightArrow,
+        HostKeyCode::Up => InputKeyCode::UpArrow,
+        HostKeyCode::Down => InputKeyCode::DownArrow,
+        HostKeyCode::Shift => InputKeyCode::Shift,
+        HostKeyCode::Control => InputKeyCode::Ctrl,
+        HostKeyCode::Function(number @ 1..=12) => match number {
+            1 => InputKeyCode::F1,
+            2 => InputKeyCode::F2,
+            3 => InputKeyCode::F3,
+            4 => InputKeyCode::F4,
+            5 => InputKeyCode::F5,
+            6 => InputKeyCode::F6,
+            7 => InputKeyCode::F7,
+            8 => InputKeyCode::F8,
+            9 => InputKeyCode::F9,
+            10 => InputKeyCode::F10,
+            11 => InputKeyCode::F11,
+            12 => InputKeyCode::F12,
+            _ => unreachable!("function key range is bounded above"),
+        },
+        HostKeyCode::Backspace
+        | HostKeyCode::PageUp
+        | HostKeyCode::PageDown
+        | HostKeyCode::Home
+        | HostKeyCode::End
+        | HostKeyCode::Insert
+        | HostKeyCode::Delete
+        | HostKeyCode::Alt
+        | HostKeyCode::Character(_)
+        | HostKeyCode::Function(_)
+        | HostKeyCode::Unknown(_) => return None,
+    })
+}
+
+#[cfg(test)]
+mod hosted_input_tests {
+    use super::{hosted_keycode, RfvpCore, RfvpCoreConfig};
+    use crate::host_api::{InputModifiers, KeyCode as HostKeyCode, RfvpEvent};
+    use crate::subsystem::resources::input_manager::KeyCode as InputKeyCode;
+
+    #[test]
+    fn maps_hosted_confirm_and_navigation_keys() {
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Return),
+            Some(InputKeyCode::Enter)
+        );
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Left),
+            Some(InputKeyCode::LeftArrow)
+        );
+        assert_eq!(
+            hosted_keycode(HostKeyCode::Function(12)),
+            Some(InputKeyCode::F12)
+        );
+    }
+
+    #[test]
+    fn rejects_hosted_keys_without_an_fvp_input_bit() {
+        assert_eq!(hosted_keycode(HostKeyCode::Character('x')), None);
+        assert_eq!(hosted_keycode(HostKeyCode::Function(13)), None);
+    }
+
+    #[test]
+    fn hosted_event_is_latched_exactly_once_before_vm() {
+        let mut core = RfvpCore::new(RfvpCoreConfig::default());
+        core.push_event(RfvpEvent::KeyDown {
+            key: HostKeyCode::Return,
+            repeat: false,
+            modifiers: InputModifiers::empty(),
+        })
+        .unwrap();
+
+        core.apply_pending_events_to_game_data();
+        assert_eq!(core.game_data.inputs_manager.get_input_down(), 0);
+
+        core.game_data.inputs_manager.begin_frame();
+        assert_ne!(core.game_data.inputs_manager.get_input_down(), 0);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RfvpCoreConfig {
@@ -109,12 +212,16 @@ pub struct RfvpCore {
     pending_events: Vec<RfvpEvent>,
     frame_index: u64,
     last_tick_us: Option<u64>,
+    last_dissolve_transitioning: bool,
+    last_dissolve2_transitioning: bool,
     quit_requested: bool,
     run_state: RfvpCoreRunState,
     loaded_game: Option<RfvpLoadedGame>,
     parser: Option<Parser>,
     game_data: GameData,
     vm_runner: Option<VmRunner>,
+    #[cfg(feature = "hosted")]
+    hosted_trace_capacity: usize,
     render_cache: HostPrimRenderCache,
     hit_proxies: HitProxyTable,
     last_error: Option<RfvpError>,
@@ -128,12 +235,16 @@ impl RfvpCore {
             pending_events: Vec::new(),
             frame_index: 0,
             last_tick_us: None,
+            last_dissolve_transitioning: false,
+            last_dissolve2_transitioning: false,
             quit_requested: false,
             run_state: RfvpCoreRunState::NotBooted,
             loaded_game: None,
             parser: None,
             game_data: GameData::default(),
             vm_runner: None,
+            #[cfg(feature = "hosted")]
+            hosted_trace_capacity: 0,
             render_cache: HostPrimRenderCache::new(),
             hit_proxies: HitProxyTable::default(),
             last_error: None,
@@ -153,6 +264,15 @@ impl RfvpCore {
         self.quit_requested
     }
 
+    /// A hosted session is terminal when either the host requested shutdown or
+    /// the script's main execution path reached its terminal state.
+    #[cfg(feature = "hosted")]
+    pub fn hosted_terminal(&self) -> bool {
+        self.quit_requested
+            || self.game_data.get_main_thread_exited()
+            || self.game_data.get_game_should_exit()
+    }
+
     pub fn run_state(&self) -> RfvpCoreRunState {
         self.run_state
     }
@@ -169,6 +289,59 @@ impl RfvpCore {
         self.last_error_detail.as_deref()
     }
 
+    #[cfg(feature = "hosted")]
+    pub fn set_hosted_trace_capacity(&mut self, capacity: usize) -> RfvpResult<()> {
+        if let Some(vm_runner) = self.vm_runner.as_mut() {
+            vm_runner
+                .set_hosted_trace_capacity(capacity)
+                .map_err(|_| RfvpError::CapacityExceeded)?;
+        } else if capacity > 65_536 {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        self.hosted_trace_capacity = capacity;
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn hosted_trace(&self) -> RfvpResult<Vec<HostedVmTraceRecord>> {
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        Ok(vm_runner.hosted_trace())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn take_hosted_video_commands(
+        &mut self,
+    ) -> Vec<crate::subsystem::resources::videoplayer::HostMovieCommand> {
+        let mut commands = Vec::new();
+        self.game_data
+            .video_manager
+            .drain_host_commands(&mut commands);
+        commands
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn take_hosted_text_events(
+        &mut self,
+    ) -> Vec<crate::subsystem::world::HostedTextEvent> {
+        self.game_data.take_hosted_text_events()
+    }
+
+    /// Completes the single host-owned movie currently active in this
+    /// session. The embedding must call this only after it has matched a
+    /// previously emitted hosted video command; unsolicited completion is an
+    /// embedding protocol error and must be rejected before this boundary.
+    #[cfg(feature = "hosted")]
+    pub fn complete_hosted_video(&mut self) -> RfvpResult<()> {
+        if !self.game_data.video_manager.is_playing() {
+            return Err(RfvpError::InvalidData);
+        }
+        self.game_data
+            .video_manager
+            .stop(&mut self.game_data.motion_manager);
+        self.game_data.set_halt(false);
+        Ok(())
+    }
+
     pub fn push_event(&mut self, event: RfvpEvent) -> RfvpResult<()> {
         if self.pending_events.len() >= self.config.max_pending_events {
             return Err(RfvpError::CapacityExceeded);
@@ -177,8 +350,59 @@ impl RfvpCore {
         Ok(())
     }
 
+    /// Reads one logical RFVP resource from the session-owned pack index.
+    ///
+    /// Pack bytes are still obtained through the embedding's `RfvpHost` file
+    /// port that was used at boot; this method only resolves the bounded
+    /// archive entry metadata retained by the core. It never opens an ambient
+    /// filesystem path.
+    #[cfg(feature = "hosted")]
+    pub fn read_hosted_resource(
+        &self,
+        resource_uri: &str,
+        max_bytes: usize,
+    ) -> RfvpResult<Vec<u8>> {
+        if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let (mut stream, known_len) = self
+            .game_data
+            .vfs
+            .open_stream_with_len(resource_uri)
+            .map_err(|_| RfvpError::NotFound)?;
+        if known_len.is_some_and(|len| len > max_bytes as u64) {
+            return Err(RfvpError::CapacityExceeded);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or(RfvpError::CapacityExceeded)? as u64;
+        let capacity = known_len
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or_default();
+        let mut bytes = Vec::with_capacity(capacity);
+        stream
+            .by_ref()
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RfvpError::Io)?;
+        if bytes.len() > max_bytes {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        Ok(bytes)
+    }
+
     pub fn clear_events(&mut self) {
         self.pending_events.clear();
+    }
+
+    /// Drops only the transient renderer upload generations retained by the
+    /// core. A hosted embedding owns the actual backend texture lifetime, so
+    /// boot and restore boundaries must force the next frame to republish each
+    /// live graph instead of trusting a cache from a previous host epoch.
+    #[cfg(feature = "hosted")]
+    pub fn invalidate_host_render_cache(&mut self) {
+        self.render_cache = HostPrimRenderCache::new();
     }
 
     pub fn boot<H: RfvpHost>(&mut self, host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<()>
@@ -268,6 +492,7 @@ impl RfvpCore {
             self.last_error_detail = Some(detail);
             err
         })?;
+        #[cfg(feature = "old_school")]
         let default_font = load_required_default_font(host).map_err(|(err, detail)| {
             self.last_error_detail = Some(detail);
             err
@@ -280,25 +505,41 @@ impl RfvpCore {
                 scale_old_school_u32(screen.1, old_school_scale),
             );
         }
-        GLOBAL.lock().map_err(|_| RfvpError::Backend)?.init_with(
-            parser.get_non_volatile_global_count(),
-            parser.get_volatile_global_count(),
-        );
-
         let mut vfs = build_host_vfs(host, boot)?;
         #[cfg(not(feature = "old_school"))]
         vfs.add_loose_file(&hcb.path, hcb.bytes.clone());
 
         let mut game_data = GameData::default();
+        #[cfg(feature = "hosted")]
+        game_data.init_hosted_globals(
+            parser.get_non_volatile_global_count(),
+            parser.get_volatile_global_count(),
+        );
+        #[cfg(not(feature = "hosted"))]
+        GLOBAL.lock().map_err(|_| RfvpError::Backend)?.init_with(
+            parser.get_non_volatile_global_count(),
+            parser.get_volatile_global_count(),
+        );
         #[cfg(feature = "old_school")]
         game_data.set_old_school_scale(old_school_scale);
-        game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        #[cfg(feature = "old_school")]
+        {
+            game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        }
+        #[cfg(not(feature = "old_school"))]
+        {
+            game_data.fontface_manager = FontEnumerator::new();
+        }
         game_data.vfs = vfs;
         game_data.nls = boot.nls;
         game_data.set_window(Window::new(screen, 1.0));
 
         let mut vm_runner =
             VmRunner::new(crate::subsystem::resources::thread_manager::ThreadManager::new());
+        #[cfg(feature = "hosted")]
+        vm_runner
+            .set_hosted_trace_capacity(self.hosted_trace_capacity)
+            .map_err(|_| RfvpError::CapacityExceeded)?;
         vm_runner.start_main(parser.get_entry_point());
         host.log(
             RfvpLogLevel::Info,
@@ -320,6 +561,10 @@ impl RfvpCore {
         self.game_data = game_data;
         self.vm_runner = Some(vm_runner);
         self.parser = Some(parser);
+        // Bind the first hosted frame to elapsed host time since boot. Leaving
+        // this unset makes the first tick consume a zero delta and permanently
+        // shifts script timers and motion state by one presentation.
+        self.last_tick_us = Some(host.clock().ticks_us());
         Ok(())
     }
 
@@ -344,23 +589,87 @@ impl RfvpCore {
         }
 
         crate::platform_time::set_host_time_us(now);
+        self.game_data
+            .time_mut_ref()
+            .set_external_delta(crate::platform_time::Duration::from_micros(elapsed_us));
+        let frame_duration = self.game_data.time_mut_ref().frame();
+        let frame_us = frame_duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        let frame_time_ms = if frame_us == 0 {
+            0
+        } else {
+            (frame_us + 999) / 1_000
+        };
+        self.game_data
+            .timer_manager
+            .tick(frame_time_ms.min(u64::from(u32::MAX)) as u32);
+        self.game_data.inputs_manager.begin_frame();
+        let video_tick_error = {
+            let (video_manager, motion_manager) = (
+                &mut self.game_data.video_manager,
+                &mut self.game_data.motion_manager,
+            );
+            video_manager.tick(motion_manager).err()
+        };
+        if let Some(error) = video_tick_error {
+            let message = error.to_string();
+            host.log(RfvpLogLevel::Error, &message);
+            self.last_error = Some(RfvpError::Unsupported);
+            self.last_error_detail = Some(message);
+            return Err(RfvpError::Unsupported);
+        }
+        self.game_data.set_current_thread(0);
+        if self.game_data.get_halt() {
+            self.game_data.set_halt(false);
+        }
         host.audio().tick(elapsed_us)?;
+        #[cfg(feature = "hosted")]
+        let loaded_hosted_save = self.process_hosted_load(host)?;
+        #[cfg(not(feature = "hosted"))]
+        let loaded_hosted_save = false;
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
-            let frame_time_ms = elapsed_us / 1_000;
-            if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
-                let message = err.to_string();
-                host.log(RfvpLogLevel::Error, &message);
-                self.last_error = Some(RfvpError::Unsupported);
-                self.last_error_detail = Some(message);
-                return Err(RfvpError::Unsupported);
+            let dissolve_type = self.game_data.motion_manager.get_dissolve_type();
+            let dissolve_transitioning = !matches!(
+                dissolve_type,
+                crate::subsystem::resources::motion_manager::DissolveType::None
+                    | crate::subsystem::resources::motion_manager::DissolveType::Static
+            );
+            let dissolve2_transitioning =
+                self.game_data.motion_manager.is_dissolve2_transitioning();
+            let dissolve_completed = (self.last_dissolve_transitioning && !dissolve_transitioning)
+                || (self.last_dissolve2_transitioning && !dissolve2_transitioning);
+            self.last_dissolve_transitioning = dissolve_transitioning;
+            self.last_dissolve2_transitioning = dissolve2_transitioning;
+            if dissolve_completed && !loaded_hosted_save {
+                if let Err(err) = vm_runner.tick(&mut self.game_data, parser, 0) {
+                    let message = err.to_string();
+                    host.log(RfvpLogLevel::Error, &message);
+                    self.last_error = Some(RfvpError::Unsupported);
+                    self.last_error_detail = Some(message);
+                    return Err(RfvpError::Unsupported);
+                }
+            }
+            if !loaded_hosted_save {
+                if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
+                    let message = err.to_string();
+                    host.log(RfvpLogLevel::Error, &message);
+                    self.last_error = Some(RfvpError::Unsupported);
+                    self.last_error_detail = Some(message);
+                    return Err(RfvpError::Unsupported);
+                }
             }
 
             // The original engine advances scripts before text and motion updates.
             let mut scene = AnzuScene::new();
             scene.update_after_vm(&mut self.game_data, frame_time_ms);
+            self.game_data.set_current_thread(0);
 
             self.flush_audio(host)?;
+            #[cfg(feature = "hosted")]
+            self.persist_hosted_file_operations(host)?;
+            #[cfg(feature = "hosted")]
+            self.persist_hosted_save(host)?;
             self.render_game_frame(host)?;
+            self.game_data.inputs_manager.frame_reset();
         } else if self.run_state == RfvpCoreRunState::BootFailed {
             return Err(self.last_error.unwrap_or(RfvpError::InvalidData));
         }
@@ -373,12 +682,148 @@ impl RfvpCore {
         })
     }
 
+    #[cfg(feature = "hosted")]
+    fn process_hosted_load<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<bool> {
+        let Some(slot) = self.game_data.save_manager.take_load_request() else {
+            return Ok(false);
+        };
+        let path = SaveItem::get_save_path(slot);
+        let path = path.to_str().ok_or(RfvpError::InvalidData)?;
+        let mut file = host.fs().open(path)?;
+        let bytes = file.read_to_vec(64 * 1024 * 1024)?;
+        let nls = self.game_data.get_nls();
+        self.game_data
+            .save_manager
+            .load_slot_into_current_from_bytes(slot, nls, &bytes)
+            .map_err(|_| RfvpError::InvalidData)?;
+        let snapshot = try_decode_state_chunk_v1(&bytes)
+            .map_err(|_| RfvpError::InvalidData)?
+            .ok_or(RfvpError::InvalidData)?;
+        let vm_runner = self.vm_runner.as_mut().ok_or(RfvpError::InvalidData)?;
+        snapshot
+            .apply(&mut self.game_data, vm_runner.thread_manager_mut())
+            .map_err(|_| RfvpError::InvalidData)?;
+        Ok(true)
+    }
+
+    #[cfg(feature = "hosted")]
+    fn persist_hosted_save<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let Some((slot, thumb_width, thumb_height)) =
+            self.game_data.save_manager.pending_save_capture()
+        else {
+            return Ok(());
+        };
+        if slot >= 1000 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let vm_runner = self.vm_runner.as_ref().ok_or(RfvpError::InvalidData)?;
+        let snapshot =
+            SaveStateSnapshotV1::capture_hosted(&self.game_data, vm_runner.thread_manager());
+        let thumb = render_hosted_save_thumbnail(
+            &self.game_data.motion_manager,
+            self.config.virtual_width,
+            self.config.virtual_height,
+            thumb_width.max(1),
+            thumb_height.max(1),
+        )?;
+        let nls = self.game_data.get_nls();
+        let bytes = self
+            .game_data
+            .save_manager
+            .build_and_store_hosted_save(slot, thumb, &snapshot, nls)
+            .map_err(|_| RfvpError::InvalidData)?;
+        let path = SaveItem::get_save_path(slot);
+        let path = path.to_str().ok_or(RfvpError::InvalidData)?;
+        host.fs().write_all(path, &bytes)?;
+        self.game_data.save_manager.consume_save_write_result();
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    fn persist_hosted_file_operations<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let operations = self.game_data.save_manager.take_file_operations();
+        for operation in operations {
+            match operation {
+                HostedSaveFileOperation::Refresh => self.refresh_hosted_saves(host)?,
+                HostedSaveFileOperation::Remove { slot } => {
+                    let path = SaveItem::get_save_path(slot);
+                    host.fs()
+                        .remove(path.to_str().ok_or(RfvpError::InvalidData)?)?;
+                }
+                HostedSaveFileOperation::Copy {
+                    source,
+                    destination,
+                } => {
+                    let source = SaveItem::get_save_path(source);
+                    let destination = SaveItem::get_save_path(destination);
+                    host.fs().copy(
+                        source.to_str().ok_or(RfvpError::InvalidData)?,
+                        destination.to_str().ok_or(RfvpError::InvalidData)?,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    fn refresh_hosted_saves<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        let mut entries = Vec::new();
+        host.fs().list("save", &mut |path, info| {
+            if info.kind == crate::host_api::RfvpFileKind::File {
+                entries.push(path.to_owned());
+            }
+            Ok(())
+        })?;
+        entries.sort();
+        self.game_data.save_manager.clear_cached_slots();
+        let nls = self.game_data.get_nls();
+        for path in entries {
+            let Some(slot) = hosted_save_slot_from_path(&path) else {
+                continue;
+            };
+            let mut file = host.fs().open(&path)?;
+            let bytes = file.read_to_vec(64 * 1024 * 1024)?;
+            self.game_data
+                .save_manager
+                .load_slot_into_current_from_bytes(slot, nls.clone(), &bytes)
+                .map_err(|_| RfvpError::InvalidData)?;
+        }
+        Ok(())
+    }
+
     pub fn render_empty_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
         self.render_game_frame(host)
     }
 
     pub fn render_status_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
         self.render_game_frame(host)
+    }
+
+    /// Applies a completed hosted text Hook result before the presentation surface is acquired.
+    #[cfg(feature = "hosted")]
+    pub fn replace_hosted_text(&mut self, slot: u8, text: &str) -> RfvpResult<()> {
+        if slot >= 32 || text.len() >= 512 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let slot = i32::from(slot);
+        self.game_data
+            .motion_manager
+            .text_manager
+            .set_text_content(slot, text);
+        self.game_data
+            .motion_manager
+            .text_upload_slot(slot, &self.game_data.fontface_manager, true)
+            .map_err(|_| RfvpError::InvalidData)?;
+        Ok(())
+    }
+
+    /// Rasterizes the authoritative RFVP scene directly into the currently bound buffer.
+    #[cfg(feature = "hosted")]
+    pub fn render_hosted_software(&self, renderer: &mut SoftRenderer) -> RfvpResult<()> {
+        renderer
+            .render_motion(&self.game_data.motion_manager)
+            .map_err(|_| RfvpError::InvalidData)
     }
 
     fn render_game_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
@@ -395,6 +840,18 @@ impl RfvpCore {
     fn apply_pending_events_to_game_data(&mut self) {
         for event in &self.pending_events {
             match *event {
+                RfvpEvent::KeyDown { key, repeat, .. } => {
+                    if let Some(keycode) = hosted_keycode(key) {
+                        self.game_data
+                            .inputs_manager
+                            .notify_keycode_down(keycode, repeat);
+                    }
+                }
+                RfvpEvent::KeyUp { key, .. } => {
+                    if let Some(keycode) = hosted_keycode(key) {
+                        self.game_data.inputs_manager.notify_keycode_up(keycode);
+                    }
+                }
                 RfvpEvent::PointerMove { x, y, in_screen } => {
                     self.game_data.inputs_manager.notify_mouse_move(x, y);
                     self.game_data.inputs_manager.set_mouse_in(in_screen);
@@ -421,7 +878,6 @@ impl RfvpCore {
                 _ => {}
             }
         }
-        self.game_data.inputs_manager.begin_frame();
     }
 
     fn flush_audio<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
@@ -429,17 +885,26 @@ impl RfvpCore {
         self.game_data.audio_manager().drain_commands(&mut commands);
         for command in commands {
             match command {
-                crate::rfvp_audio::AudioCommand::LoadEncoded { id, kind, bytes } => {
-                    host.audio().load_encoded(id, kind, &bytes)?;
+                crate::rfvp_audio::AudioCommand::LoadEncoded {
+                    id,
+                    kind,
+                    resource_uri,
+                    bytes,
+                } => {
+                    if let Some(resource_uri) = resource_uri {
+                        host.audio().load_resource(id, kind, &resource_uri)?;
+                    } else {
+                        host.audio().load_encoded_owned(id, kind, bytes)?;
+                    }
                 }
                 crate::rfvp_audio::AudioCommand::CreateStream { id, desc } => {
                     host.audio().create_stream(id, desc)?;
                 }
                 crate::rfvp_audio::AudioCommand::SubmitI16 { id, samples } => {
-                    host.audio().submit_i16(id, &samples)?;
+                    host.audio().submit_i16_owned(id, samples)?;
                 }
                 crate::rfvp_audio::AudioCommand::SubmitF32 { id, samples } => {
-                    host.audio().submit_f32(id, &samples)?;
+                    host.audio().submit_f32_owned(id, samples)?;
                 }
                 crate::rfvp_audio::AudioCommand::Play {
                     id,
@@ -472,76 +937,95 @@ impl RfvpCore {
     }
 }
 
+#[cfg(feature = "hosted")]
+fn render_hosted_save_thumbnail(
+    motion: &crate::subsystem::resources::motion_manager::MotionManager,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> RfvpResult<Vec<u8>> {
+    let mut renderer = SoftRenderer::new(
+        source_width,
+        source_height,
+        crate::soft_render::PixelFormat::Rgba8,
+    )
+    .map_err(|_| RfvpError::CapacityExceeded)?;
+    renderer
+        .render_motion(motion)
+        .map_err(|_| RfvpError::InvalidData)?;
+    let source = renderer.framebuffer().pixels();
+    let target_len = usize::try_from(
+        u64::from(target_width)
+            .checked_mul(u64::from(target_height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(RfvpError::CapacityExceeded)?,
+    )
+    .map_err(|_| RfvpError::CapacityExceeded)?;
+    let mut target = vec![0; target_len];
+    for y in 0..target_height {
+        let source_y = u64::from(y) * u64::from(source_height) / u64::from(target_height);
+        for x in 0..target_width {
+            let source_x = u64::from(x) * u64::from(source_width) / u64::from(target_width);
+            let source_offset =
+                usize::try_from((source_y * u64::from(source_width) + source_x) * 4)
+                    .map_err(|_| RfvpError::CapacityExceeded)?;
+            let target_offset =
+                usize::try_from((u64::from(y) * u64::from(target_width) + u64::from(x)) * 4)
+                    .map_err(|_| RfvpError::CapacityExceeded)?;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(feature = "hosted")]
+fn hosted_save_slot_from_path(path: &str) -> Option<u32> {
+    let name = path.strip_prefix("save/save")?.strip_suffix(".dat")?;
+    if name.len() != 3 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let slot = name.parse().ok()?;
+    (slot < 1000).then_some(slot)
+}
+
+#[cfg(feature = "old_school")]
 fn load_required_default_font<H: RfvpHost>(host: &mut H) -> Result<Font, (RfvpError, String)> {
     let callbacks = host.platform_callbacks();
     let mut bytes = Vec::new();
-    #[cfg(feature = "old_school")]
+    if host
+        .fs()
+        .read_required_file("defualt.tmap", &mut bytes)
+        .is_err()
     {
-        if host
-            .fs()
-            .read_required_file("defualt.tmap", &mut bytes)
-            .is_err()
-        {
-            notify_fatal(
-                callbacks,
-                FatalErrorCode::MissingDefaultFont,
-                MISSING_OLD_SCHOOL_FONT_MESSAGE,
-            );
-            return Err((
-                RfvpError::NotFound,
-                MISSING_OLD_SCHOOL_FONT_MESSAGE.to_string(),
-            ));
-        }
-        match Font::from_old_school_tmap(bytes) {
-            Ok(font) => Ok(font),
-            Err(_) => {
-                notify_fatal(
-                    callbacks,
-                    FatalErrorCode::InvalidDefaultFont,
-                    INVALID_OLD_SCHOOL_FONT_MESSAGE,
-                );
-                Err((
-                    RfvpError::InvalidData,
-                    INVALID_OLD_SCHOOL_FONT_MESSAGE.to_string(),
-                ))
-            }
-        }
+        notify_fatal(
+            callbacks,
+            FatalErrorCode::MissingDefaultFont,
+            MISSING_OLD_SCHOOL_FONT_MESSAGE,
+        );
+        return Err((
+            RfvpError::NotFound,
+            MISSING_OLD_SCHOOL_FONT_MESSAGE.to_string(),
+        ));
     }
-
-    #[cfg(not(feature = "old_school"))]
-    {
-        if host
-            .fs()
-            .read_required_file("default.ttf", &mut bytes)
-            .is_err()
-        {
+    match Font::from_old_school_tmap(bytes) {
+        Ok(font) => Ok(font),
+        Err(_) => {
             notify_fatal(
                 callbacks,
-                FatalErrorCode::MissingDefaultFont,
-                MISSING_DEFAULT_FONT_MESSAGE,
+                FatalErrorCode::InvalidDefaultFont,
+                INVALID_OLD_SCHOOL_FONT_MESSAGE,
             );
-            return Err((
-                RfvpError::NotFound,
-                MISSING_DEFAULT_FONT_MESSAGE.to_string(),
-            ));
-        }
-        match Font::from_vec(bytes) {
-            Ok(font) => Ok(font),
-            Err(_) => {
-                notify_fatal(
-                    callbacks,
-                    FatalErrorCode::InvalidDefaultFont,
-                    INVALID_DEFAULT_FONT_MESSAGE,
-                );
-                Err((
-                    RfvpError::InvalidData,
-                    INVALID_DEFAULT_FONT_MESSAGE.to_string(),
-                ))
-            }
+            Err((
+                RfvpError::InvalidData,
+                INVALID_OLD_SCHOOL_FONT_MESSAGE.to_string(),
+            ))
         }
     }
 }
 
+#[cfg(feature = "old_school")]
 fn notify_fatal(callbacks: PlatformCallbacks, code: FatalErrorCode, message: &str) {
     if let Some(callback) = callbacks.fatal_error {
         callback(callbacks.user_data, code, message.as_ptr(), message.len());
@@ -676,7 +1160,10 @@ struct LoadedHcb {
     info: RfvpFileInfo,
 }
 
-fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<Vfs> {
+fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<Vfs>
+where
+    <H::FileSystem as RfvpFileSystem>::File: 'static,
+{
     let mut vfs = Vfs::new(boot.nls).map_err(|_| RfvpError::InvalidData)?;
     #[cfg(feature = "old_school")]
     {
@@ -699,18 +1186,17 @@ fn build_host_vfs<H: RfvpHost>(host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpRe
                 .enumerate_by_extension(boot.asset_root, "bin", visitor)?;
         }
         for path in packs {
-            let mut file = host.fs().open(&path)?;
-            let bytes = file.read_to_vec(usize::MAX)?;
             let folder = path
                 .rsplit('/')
                 .next()
                 .unwrap_or(path.as_str())
                 .strip_suffix(".bin")
                 .unwrap_or(path.as_str());
-            vfs.add_pack_bytes(folder, bytes).map_err(|err| {
+            let file = host.fs().open(&path)?;
+            vfs.add_host_pack(folder, Box::new(file)).map_err(|err| {
                 host.log(
                     RfvpLogLevel::Warn,
-                    &format!("failed to parse host pack {path}: {err}"),
+                    &format!("failed to parse host pack metadata {path}: {err}"),
                 );
                 RfvpError::InvalidData
             })?;
