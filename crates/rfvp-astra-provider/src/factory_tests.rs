@@ -28,7 +28,6 @@ fn fvp_factory_mounts_nested_entries_with_bounded_ranges_and_streams() {
         profile_hash: Hash256::from_sha256(b"profile"),
         mount_id: "fixture-fvp".into(),
         prefix: "fvp:/".into(),
-        private_patch: None,
         family_config: LegacyOpaqueFamilyConfig {
             schema_id: FVP_FAMILY_OPTIONS_SCHEMA.into(),
             schema_hash: Hash256::from_sha256(FVP_FAMILY_OPTIONS_SCHEMA.as_bytes()),

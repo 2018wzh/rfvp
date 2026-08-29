@@ -365,9 +365,7 @@ impl FvpArchive {
             prefix: "fvp:/".into(),
             reader_id: "astra.fvp.bin.v1".into(),
             reader_hash,
-            decrypt_provider_id: "astra.emu.fvp.raw.v1".into(),
-            private_profile_hash: Hash256::from_sha256(b"astra.emu.fvp.no_private_profile"),
-            mount_profile_hash: reader_hash,
+            launch_profile_hash: reader_hash,
             sources: vec![LegacyVfsSource {
                 source_id: folder.into(),
                 archive_role: Some(folder.into()),

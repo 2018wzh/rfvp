@@ -43,16 +43,12 @@ impl LegacyVfsFamilyFactory for FvpVfsFamilyFactory {
         "fvp"
     }
 
-    fn mount_profile_schema_id(&self) -> &str {
+    fn family_options_schema_id(&self) -> &str {
         FVP_FAMILY_OPTIONS_SCHEMA
     }
 
-    fn mount_profile_schema_hash(&self) -> Hash256 {
+    fn family_options_schema_hash(&self) -> Hash256 {
         Hash256::from_sha256(FVP_FAMILY_OPTIONS_SCHEMA.as_bytes())
-    }
-
-    fn decrypt_provider_id(&self) -> &str {
-        FVP_DECRYPT_PROVIDER_ID
     }
 
     fn mount(
@@ -60,13 +56,12 @@ impl LegacyVfsFamilyFactory for FvpVfsFamilyFactory {
         context: &LegacyVfsMountContext,
     ) -> Result<Arc<dyn LegacyMountedVfs>, LegacyCoreError> {
         if context.family_config.schema_id != FVP_FAMILY_OPTIONS_SCHEMA
-            || context.family_config.schema_hash != self.mount_profile_schema_hash()
+            || context.family_config.schema_hash != self.family_options_schema_hash()
             || context.prefix != "fvp:/"
-            || context.private_patch.is_some()
         {
             return Err(invalid(
                 "ASTRA_EMU_FVP_MOUNT_PROFILE",
-                "FVP mount identity, options schema, or no-patch policy is invalid",
+                "FVP mount identity or options schema is invalid",
             ));
         }
         let options: FvpVfsFamilyOptions = serde_json::from_slice(&context.family_config.payload)
@@ -193,9 +188,7 @@ impl FvpMountedVfs {
             prefix: context.prefix.clone(),
             reader_id: FVP_READER_ID.into(),
             reader_hash,
-            decrypt_provider_id: FVP_DECRYPT_PROVIDER_ID.into(),
-            private_profile_hash: Hash256::from_sha256(b"astra.emu.fvp.no_private_profile"),
-            mount_profile_hash: context.profile_hash,
+            launch_profile_hash: context.profile_hash,
             sources: archives
                 .iter()
                 .map(|archive| LegacyVfsSource {
@@ -422,7 +415,6 @@ impl LegacyMountedVfs for FvpMountedVfs {
             offset,
             bytes,
             eof: end == entry.size,
-            cache_hit: false,
         })
     }
 
