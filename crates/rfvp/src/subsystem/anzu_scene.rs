@@ -9,7 +9,9 @@ use alloc::{
 };
 
 use super::{scene::Scene, world::GameData};
-use crate::{script::global::GLOBAL, subsystem::resources::input_manager::KeyCode};
+#[cfg(not(feature = "hosted"))]
+use crate::script::global::GLOBAL;
+use crate::subsystem::resources::input_manager::KeyCode;
 
 #[derive(Default)]
 pub struct AnzuScene {}
@@ -139,6 +141,9 @@ impl AnzuScene {
     fn update_text_reveal(&mut self, game_data: &mut GameData, elapsed: i64) {
         let completed = game_data.motion_manager.update_text_reveal(
             elapsed,
+            #[cfg(feature = "hosted")]
+            game_data.hosted_global_int(0),
+            #[cfg(not(feature = "hosted"))]
             GLOBAL.lock().unwrap().get_int_var(0),
             elapsed < 0,
             &game_data.fontface_manager,

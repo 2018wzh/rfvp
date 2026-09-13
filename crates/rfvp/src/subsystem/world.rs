@@ -22,6 +22,8 @@ use crate::subsystem::components::syscalls::utils::{
     nullsub_2, Debmess, DissolveWait, ExitDialog, TitleMenu, UnimplementedNamed,
 };
 
+#[cfg(feature = "hosted")]
+use crate::script::global::Global;
 use crate::script::{Variant, VmSyscall};
 use crate::subsystem::components::syscalls::color::ColorSet;
 use crate::subsystem::components::syscalls::flag::{FlagGet, FlagSet};
@@ -134,6 +136,19 @@ pub trait World {
 }
 
 pub struct GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) globals: Global,
+    /// Text printed during the current hosted transaction. This queue belongs
+    /// to the session instead of the legacy process-wide text-history state,
+    /// so concurrent hosted games cannot leak dialogue into one another.
+    #[cfg(feature = "hosted")]
+    hosted_text_events: Vec<HostedTextEvent>,
+    #[cfg(feature = "hosted")]
+    hosted_text_bytes: usize,
+    #[cfg(feature = "hosted")]
+    hosted_text_max_operations: usize,
+    #[cfg(feature = "hosted")]
+    hosted_text_max_bytes: usize,
     pub(crate) vfs: Vfs,
     pub(crate) thread_wrapper: ThreadWrapper,
     pub(crate) history_manager: HistoryManager,
@@ -177,6 +192,16 @@ pub struct GameData {
     pub(crate) debug_vm: crate::debug_ui::vm_snapshot::VmSnapshot,
 }
 
+/// Host-neutral text emitted by a script print operation. The embedding owns
+/// redaction, lease and persistence policy; RFVP only preserves the semantic
+/// slot and bytes produced by its own session.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostedTextEvent {
+    pub slot: u8,
+    pub text: String,
+}
+
 impl GameData {
     /// Initialize a `GameData` at `dst` with the same values as `GameData::default()`,
     /// but without creating a large temporary on the stack.
@@ -191,6 +216,16 @@ impl GameData {
         uefi_game_data_stage!("[UEFI] GameData init after AudioManager");
 
         uefi_game_data_stage!("[UEFI] GameData init before vfs");
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).globals).write(Global::new());
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).hosted_text_events).write(Vec::new());
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).hosted_text_bytes).write(0);
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).hosted_text_max_operations).write(256);
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).hosted_text_max_bytes).write(128 * 1024);
         ptr::addr_of_mut!((*dst).vfs).write(Vfs::default());
         uefi_game_data_stage!("[UEFI] GameData init after vfs");
         uefi_game_data_stage!("[UEFI] GameData init before thread_wrapper");
@@ -257,6 +292,16 @@ impl Default for GameData {
         let audio_manager = Arc::new(AudioManager::new());
 
         Self {
+            #[cfg(feature = "hosted")]
+            globals: Global::new(),
+            #[cfg(feature = "hosted")]
+            hosted_text_events: Vec::new(),
+            #[cfg(feature = "hosted")]
+            hosted_text_bytes: 0,
+            #[cfg(feature = "hosted")]
+            hosted_text_max_operations: 256,
+            #[cfg(feature = "hosted")]
+            hosted_text_max_bytes: 128 * 1024,
             vfs: Vfs::default(),
             thread_wrapper: ThreadWrapper::default(),
             history_manager: HistoryManager::default(),
@@ -300,6 +345,47 @@ impl Default for GameData {
 }
 
 impl GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) fn init_hosted_globals(&mut self, non_volatile: u16, volatile: u16) {
+        self.globals.init_with(non_volatile, volatile);
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn hosted_global_int(&self, key: u16) -> i32 {
+        self.globals.get_int_var(key)
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn set_hosted_text_limits(&mut self, max_operations: usize, max_bytes: usize) {
+        self.hosted_text_max_operations = max_operations;
+        self.hosted_text_max_bytes = max_bytes;
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn record_hosted_text(&mut self, slot: i32, text: &str) -> bool {
+        debug_assert!((0..32).contains(&slot));
+        let Some(total) = self.hosted_text_bytes.checked_add(text.len()) else {
+            return false;
+        };
+        if self.hosted_text_events.len() >= self.hosted_text_max_operations
+            || total > self.hosted_text_max_bytes
+        {
+            return false;
+        }
+        self.hosted_text_events.push(HostedTextEvent {
+            slot: slot as u8,
+            text: text.to_owned(),
+        });
+        self.hosted_text_bytes = total;
+        true
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn take_hosted_text_events(&mut self) -> Vec<HostedTextEvent> {
+        self.hosted_text_bytes = 0;
+        core::mem::take(&mut self.hosted_text_events)
+    }
+
     /// retrieves the timers resource from the resources.
     pub fn time_ref(&self) -> &Time {
         &self.time
@@ -586,6 +672,11 @@ impl VmSyscall for GameData {
             |syscall| syscall.call(self, args),
         );
         result
+    }
+
+    #[cfg(feature = "hosted")]
+    fn with_globals<R>(&mut self, callback: impl FnOnce(&mut Global) -> R) -> R {
+        callback(&mut self.globals)
     }
 }
 

@@ -1,10 +1,14 @@
-#![cfg_attr(feature = "no_std", no_std)]
+// The hosted provider vendors an upstream MPL-2.0 tree. Keep its warning
+// policy independent from the AstraEngine workspace lint gate; provider and
+// adapter code are linted by the owning crate.
+#![allow(warnings)]
+#![cfg_attr(all(feature = "no_std", not(feature = "hosted")), no_std)]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 extern crate alloc;
 #[cfg(feature = "no_std")]
 extern crate self as image;
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "hosted")))]
 extern crate self as std;
 #[cfg(feature = "no_std")]
 pub use alloc::{format, vec};
@@ -368,6 +372,7 @@ pub mod io {
     pub enum ErrorKind {
         Other,
         InvalidInput,
+        InvalidData,
         Unsupported,
         UnexpectedEof,
     }
@@ -857,6 +862,9 @@ compile_error!("feature `no_std` is an independent core-library build and must n
 
 pub mod host_api;
 
+#[cfg(feature = "hosted")]
+pub mod hosted;
+
 #[cfg(feature = "no_std")]
 pub mod no_std_core;
 
@@ -913,8 +921,9 @@ pub mod script;
 #[cfg(all(not(feature = "no_std"), feature = "soft-render-desktop"))]
 pub mod soft_host;
 #[cfg(all(
-    not(feature = "no_std"),
+    any(not(feature = "no_std"), feature = "hosted"),
     any(
+        feature = "hosted",
         feature = "soft-render-core",
         feature = "soft-render",
         feature = "soft-render-desktop"
@@ -1137,10 +1146,7 @@ pub unsafe extern "C" fn rfvp_pump_step(handle: *mut RfvpPumpHandle, timeout_ms:
 ))]
 #[cfg(feature = "gpu-render")]
 #[no_mangle]
-pub unsafe extern "C" fn rfvp_pump_set_text_hidpi(
-    handle: *mut RfvpPumpHandle,
-    enabled: i32,
-) {
+pub unsafe extern "C" fn rfvp_pump_set_text_hidpi(handle: *mut RfvpPumpHandle, enabled: i32) {
     if handle.is_null() {
         return;
     }

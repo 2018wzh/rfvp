@@ -7,11 +7,12 @@ use alloc::{
     vec::Vec,
 };
 use anyhow::{bail, Context, Result};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_player::{BgmPlayerSnapshotV1, SePlayerSnapshotV1};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::motion_manager::MotionManagerSnapshotV1;
@@ -22,7 +23,7 @@ const SAVE_STATE_MAGIC: [u8; 4] = *b"RFVS";
 const SAVE_STATE_FOOTER_LEN: usize = 8; // u32 payload_len + 4-byte magic
 const MAX_STATE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 fn bincode_opts() -> impl bincode::Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -49,8 +50,6 @@ pub struct SaveStateSnapshotV1 {
 
 impl SaveStateSnapshotV1 {
     pub fn capture(game_data: &mut GameData) -> Self {
-        let globals_non_volatile = GLOBAL.lock().unwrap().snapshot_non_volatile();
-
         let vm = match game_data.save_manager.take_pending_vm_snapshot() {
             Some(s) => s,
             None => {
@@ -59,7 +58,33 @@ impl SaveStateSnapshotV1 {
             }
         };
 
-        SaveStateSnapshotV1 {
+        Self::capture_with_vm(game_data, vm)
+    }
+
+    /// Captures a coherent hosted checkpoint from the live VM.
+    #[cfg(feature = "hosted")]
+    pub fn capture_hosted(game_data: &GameData, vm: &ThreadManager) -> Self {
+        Self::capture_with_vm(game_data, vm.capture_snapshot_v1())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn capture_user_save(game_data: &mut GameData) -> Result<Self> {
+        let vm = game_data
+            .save_manager
+            .take_pending_vm_snapshot()
+            .context("user save has no prepared VM snapshot")?;
+        Ok(Self::capture_with_vm(game_data, vm))
+    }
+
+    fn capture_with_vm(game_data: &GameData, vm: ThreadManagerSnapshotV1) -> Self {
+        let globals_non_volatile = {
+            #[cfg(feature = "hosted")]
+            let g = &game_data.globals;
+            #[cfg(not(feature = "hosted"))]
+            let g = GLOBAL.lock().unwrap();
+            g.snapshot_non_volatile()
+        };
+        Self {
             version: 1,
             motion: game_data.motion_manager.capture_snapshot_v1(),
             audio: AudioSnapshotV1 {
@@ -93,7 +118,14 @@ impl SaveStateSnapshotV1 {
             .context("apply SePlayerSnapshotV1")?;
 
         {
+            #[cfg(feature = "hosted")]
+            let g = &mut game_data.globals;
+            #[cfg(not(feature = "hosted"))]
             let mut g = GLOBAL.lock().unwrap();
+            #[cfg(feature = "hosted")]
+            if self.globals_non_volatile.len() != usize::from(g.non_volatile_count()) {
+                bail!("hosted snapshot global count is incompatible with this session");
+            }
             g.restore_non_volatile(&self.globals_non_volatile);
         }
 
@@ -103,13 +135,13 @@ impl SaveStateSnapshotV1 {
 }
 
 pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> Result<()> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = (out, snap);
         bail!("SaveStateSnapshotV1 serialization requires the std desktop bincode adapter");
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         let payload = bincode_opts()
             .serialize(snap)
@@ -135,13 +167,13 @@ pub fn append_state_chunk_v1(out: &mut Vec<u8>, snap: &SaveStateSnapshotV1) -> R
 }
 
 pub fn try_decode_state_chunk_v1(file_bytes: &[u8]) -> Result<Option<SaveStateSnapshotV1>> {
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "hosted")))]
     {
         let _ = file_bytes;
         return Ok(None);
     }
 
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
     {
         if file_bytes.len() < SAVE_STATE_FOOTER_LEN {
             return Ok(None);

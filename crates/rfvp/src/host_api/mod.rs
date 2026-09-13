@@ -20,8 +20,8 @@ pub use host::{FatalErrorCallback, FatalErrorCode, PlatformCallbacks};
 pub use host::{RfvpHost, RfvpLogLevel};
 pub use render::{
     BlendMode, ColorRgba, CommandBlendMode, DrawGlyphCmd, DrawImageCmd, DrawSolidCommand,
-    DrawSpriteCommand, HitProxy, HitProxyTable, PixelFormat, PortableTextureDesc, PrimId, RectI16,
-    RectI32, RectU16, RenderBackend, RenderCommand, RenderFrame, RenderTargetId, ResourceId,
-    RfvpRenderer, Rgba8, TextureBackend, TextureDesc, TextureFilter, TextureFormat, TextureHandle,
-    TextureId, TextureRect, Vertex2D,
+    DrawSpriteCommand, HitProxy, HitProxyTable, HostedPixelBuffer, PixelBuffer, PixelFormat,
+    PortableTextureDesc, PrimId, RectI16, RectI32, RectU16, RenderBackend, RenderCommand,
+    RenderFrame, RenderTargetId, ResourceId, RfvpRenderer, Rgba8, TextureBackend, TextureDesc,
+    TextureFilter, TextureFormat, TextureHandle, TextureId, TextureRect, Vertex2D,
 };

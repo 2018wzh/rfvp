@@ -52,7 +52,16 @@ pub trait RfvpFile {
         }
         let mut out = Vec::new();
         out.resize(len as usize, 0);
-        self.read_exact_at(0, &mut out)?;
+        // Hosts may intentionally cap individual range reads. Keep the core
+        // file contract usable for large fonts and pack metadata without
+        // requiring a host to allocate one unbounded read buffer.
+        const READ_CHUNK_BYTES: usize = 1024 * 1024;
+        let mut offset = 0usize;
+        while offset < out.len() {
+            let end = offset.saturating_add(READ_CHUNK_BYTES).min(out.len());
+            self.read_exact_at(offset as u64, &mut out[offset..end])?;
+            offset = end;
+        }
         Ok(out)
     }
 }
@@ -71,6 +80,22 @@ pub trait RfvpFileSystem {
     }
 
     fn write_all(&mut self, _path: &str, _bytes: &[u8]) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn remove(&mut self, _path: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn copy(&mut self, _source: &str, _destination: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn list(
+        &mut self,
+        _root: &str,
+        _visitor: &mut dyn FnMut(&str, RfvpFileInfo) -> RfvpResult<()>,
+    ) -> RfvpResult<()> {
         Err(RfvpError::Unsupported)
     }
 

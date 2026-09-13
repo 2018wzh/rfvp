@@ -41,6 +41,21 @@ pub fn movie_play(game_data: &mut GameData, path: &Variant, flag: &Variant) -> R
 
     for cand in movie_path_candidates(path) {
         let cand = normalize_vfs_path(&cand);
+        #[cfg(feature = "hosted")]
+        let byte_len = match game_data.vfs.open_stream_with_len(&cand) {
+            Ok((_stream, Some(byte_len))) if byte_len > 0 => byte_len,
+            Ok(_) => continue,
+            Err(e) => {
+                log::debug!(
+                    "hosted Movie: resolve failed for {} (orig {}): {e:?}",
+                    cand,
+                    path
+                );
+                continue;
+            }
+        };
+
+        #[cfg(not(feature = "hosted"))]
         let bytes = match read_movie_bytes(game_data, &cand) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -56,7 +71,18 @@ pub fn movie_play(game_data: &mut GameData, path: &Variant, flag: &Variant) -> R
         let start_result = {
             let (video_manager, motion_manager) =
                 (&mut game_data.video_manager, &mut game_data.motion_manager);
-            video_manager.start_from_bytes(
+            #[cfg(feature = "hosted")]
+            let result = video_manager.start_from_resource(
+                &cand,
+                byte_len,
+                mode,
+                w,
+                h,
+                motion_manager,
+                audio_manager.clone(),
+            );
+            #[cfg(not(feature = "hosted"))]
+            let result = video_manager.start_from_bytes(
                 &cand,
                 bytes,
                 mode,
@@ -64,7 +90,8 @@ pub fn movie_play(game_data: &mut GameData, path: &Variant, flag: &Variant) -> R
                 h,
                 motion_manager,
                 audio_manager.clone(),
-            )
+            );
+            result
         };
 
         match start_result {

@@ -7,11 +7,12 @@ use alloc::{
     vec::Vec,
 };
 use anyhow::{bail, Context, Result};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "hosted", not(feature = "no_std")))]
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::flag_manager::FlagManager;
@@ -52,6 +53,9 @@ pub struct GlobalSaveDataV1 {
 impl GlobalSaveDataV1 {
     pub fn capture(game_data: &GameData) -> Self {
         let (non_volatile_global_count, volatile_global_count, volatile_globals) = {
+            #[cfg(feature = "hosted")]
+            let g = &game_data.globals;
+            #[cfg(not(feature = "hosted"))]
             let g = GLOBAL.lock().unwrap();
             (
                 g.non_volatile_count(),
@@ -100,6 +104,9 @@ impl GlobalSaveDataV1 {
         }
 
         {
+            #[cfg(feature = "hosted")]
+            let g = &mut game_data.globals;
+            #[cfg(not(feature = "hosted"))]
             let mut g = GLOBAL.lock().unwrap();
             g.restore_volatile_globals(
                 self.non_volatile_global_count,
@@ -129,14 +136,16 @@ impl GlobalSaveDataV1 {
     }
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "hosted", not(feature = "no_std")))]
 fn bincode_opts() -> impl bincode::Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_little_endian()
         .reject_trailing_bytes()
+        .with_limit(MAX_GLOBAL_PAYLOAD_BYTES as u64)
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn global_savedata_path() -> PathBuf {
     app_base_path()
         .get_path()
@@ -144,7 +153,7 @@ pub fn global_savedata_path() -> PathBuf {
         .join("rfvp_global.bin")
 }
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "hosted")))]
 pub fn save_global_savedata_v1(_game_data: &GameData) -> Result<()> {
     bail!("GlobalSaveDataV1 host persistence is not wired to the no_std file-system adapter")
 }
@@ -152,27 +161,7 @@ pub fn save_global_savedata_v1(_game_data: &GameData) -> Result<()> {
 #[cfg(not(feature = "no_std"))]
 pub fn save_global_savedata_v1(game_data: &GameData) -> Result<()> {
     let snap = GlobalSaveDataV1::capture(game_data);
-    let payload = bincode_opts()
-        .serialize(&snap)
-        .context("serialize GlobalSaveDataV1")?;
-
-    if payload.len() > MAX_GLOBAL_PAYLOAD_BYTES {
-        bail!(
-            "GlobalSaveDataV1 payload too large: {} bytes (max {})",
-            payload.len(),
-            MAX_GLOBAL_PAYLOAD_BYTES
-        );
-    }
-
-    let len_u32: u32 = payload
-        .len()
-        .try_into()
-        .context("payload length overflow")?;
-
-    let mut out = Vec::with_capacity(payload.len() + GLOBAL_SAVE_FOOTER_LEN);
-    out.extend_from_slice(&payload);
-    out.extend_from_slice(&len_u32.to_le_bytes());
-    out.extend_from_slice(&GLOBAL_SAVE_MAGIC);
+    let out = encode_global_savedata_v1(&snap)?;
 
     let path = global_savedata_path();
     if let Some(parent) = path.parent() {
@@ -184,7 +173,7 @@ pub fn save_global_savedata_v1(game_data: &GameData) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "hosted")))]
 pub fn try_load_global_savedata_v1(_game_data: &mut GameData) -> Result<bool> {
     Ok(false)
 }
@@ -210,12 +199,12 @@ pub fn try_load_global_savedata_v1(game_data: &mut GameData) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "hosted")))]
 pub fn try_decode_global_savedata_v1(_file_bytes: &[u8]) -> Result<Option<GlobalSaveDataV1>> {
     Ok(None)
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "hosted", not(feature = "no_std")))]
 pub fn try_decode_global_savedata_v1(file_bytes: &[u8]) -> Result<Option<GlobalSaveDataV1>> {
     if file_bytes.len() < GLOBAL_SAVE_FOOTER_LEN {
         return Ok(None);
@@ -262,3 +251,33 @@ pub fn try_decode_global_savedata_v1(file_bytes: &[u8]) -> Result<Option<GlobalS
 
     Ok(Some(snap))
 }
+
+#[cfg(any(feature = "hosted", not(feature = "no_std")))]
+pub fn encode_global_savedata_v1(snap: &GlobalSaveDataV1) -> Result<Vec<u8>> {
+    let payload = bincode_opts()
+        .serialize(snap)
+        .context("serialize GlobalSaveDataV1")?;
+
+    if payload.len() > MAX_GLOBAL_PAYLOAD_BYTES {
+        bail!(
+            "GlobalSaveDataV1 payload too large: {} bytes (max {})",
+            payload.len(),
+            MAX_GLOBAL_PAYLOAD_BYTES
+        );
+    }
+
+    let len_u32: u32 = payload
+        .len()
+        .try_into()
+        .context("payload length overflow")?;
+
+    let mut out = Vec::with_capacity(payload.len() + GLOBAL_SAVE_FOOTER_LEN);
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&len_u32.to_le_bytes());
+    out.extend_from_slice(&GLOBAL_SAVE_MAGIC);
+
+    Ok(out)
+}
+
+#[cfg(feature = "hosted")]
+pub(crate) mod hosted;

@@ -19,8 +19,8 @@ pub enum MovieMode {
 
 #[derive(Debug, Clone)]
 pub struct HostMovieCommand {
-    pub name: String,
-    pub bytes: Vec<u8>,
+    pub resource_uri: String,
+    pub byte_len: u64,
     pub mode: MovieMode,
     pub screen_w: u32,
     pub screen_h: u32,
@@ -32,6 +32,7 @@ pub struct VideoPlayerManager {
     loaded: bool,
     modal: bool,
     pending_commands: Vec<HostMovieCommand>,
+    pending_stop: bool,
 }
 
 impl VideoPlayerManager {
@@ -60,7 +61,7 @@ impl VideoPlayerManager {
         motion: &mut MotionManager,
         audio_manager: Option<Arc<AudioManager>>,
     ) -> Result<()> {
-        let name = movie_path.as_ref().as_os_str().to_string();
+        let name = movie_path.as_ref().to_string_lossy().to_string();
         self.start_from_bytes(
             &name,
             Vec::new(),
@@ -86,8 +87,37 @@ impl VideoPlayerManager {
         self.loaded = true;
         self.modal = matches!(mode, MovieMode::ModalWithAudio);
         self.pending_commands.push(HostMovieCommand {
-            name: movie_name.to_string(),
-            bytes,
+            resource_uri: movie_name.to_string(),
+            byte_len: u64::try_from(bytes.len())
+                .map_err(|_| anyhow::anyhow!("movie bytes exceed u64"))?,
+            mode,
+            screen_w,
+            screen_h,
+        });
+        Ok(())
+    }
+
+    /// Queue a host-owned VFS resource. Hosted sessions must not copy an
+    /// encoded movie into the core just to request playback.
+    pub fn start_from_resource(
+        &mut self,
+        resource_uri: &str,
+        byte_len: u64,
+        mode: MovieMode,
+        screen_w: u32,
+        screen_h: u32,
+        _motion: &mut MotionManager,
+        _audio_manager: Option<Arc<AudioManager>>,
+    ) -> Result<()> {
+        if resource_uri.is_empty() || byte_len == 0 {
+            anyhow::bail!("hosted movie resource is empty");
+        }
+        self.playing = true;
+        self.loaded = true;
+        self.modal = matches!(mode, MovieMode::ModalWithAudio);
+        self.pending_commands.push(HostMovieCommand {
+            resource_uri: resource_uri.to_string(),
+            byte_len,
             mode,
             screen_w,
             screen_h,
@@ -100,6 +130,20 @@ impl VideoPlayerManager {
     }
 
     pub fn stop(&mut self, _motion: &mut MotionManager) {
+        self.stop_inner(true);
+    }
+
+    /// Stop a host-owned movie after the embedding has already consumed its
+    /// playback completion. This clears the core state without emitting a
+    /// second host operation.
+    pub fn stop_without_host_command(&mut self, _motion: &mut MotionManager) {
+        self.stop_inner(false);
+    }
+
+    fn stop_inner(&mut self, notify_host: bool) {
+        if notify_host && self.playing {
+            self.pending_stop = true;
+        }
         self.playing = false;
         self.loaded = false;
         self.modal = false;
@@ -107,5 +151,39 @@ impl VideoPlayerManager {
 
     pub fn drain_host_commands(&mut self, out: &mut Vec<HostMovieCommand>) {
         out.extend(self.pending_commands.drain(..));
+    }
+
+    pub fn take_host_stop_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_stop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn movie_stop_emits_a_host_stop_request() {
+        let mut manager = VideoPlayerManager::new();
+        let mut motion = MotionManager::new();
+        manager
+            .start_from_resource(
+                "movie.wmv",
+                1,
+                MovieMode::ModalWithAudio,
+                800,
+                600,
+                &mut motion,
+                None,
+            )
+            .expect("movie request is queued");
+
+        manager.stop(&mut motion);
+
+        let mut commands = Vec::new();
+        manager.drain_host_commands(&mut commands);
+        assert_eq!(commands.len(), 1);
+        assert!(manager.take_host_stop_request());
+        assert!(!manager.take_host_stop_request());
     }
 }
