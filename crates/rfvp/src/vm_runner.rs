@@ -1,3 +1,5 @@
+#[cfg(feature = "hosted")]
+use alloc::collections::VecDeque;
 use anyhow::Result;
 #[cfg(not(feature = "no_std"))]
 use std::fs;
@@ -9,7 +11,7 @@ use crate::subsystem::resources::save_manager::SaveItem;
 use crate::subsystem::resources::{
     motion_manager::DissolveType, thread_manager::ThreadManager, thread_wrapper::ThreadRequest,
 };
-use crate::subsystem::save_state::try_decode_state_chunk_v1;
+use crate::subsystem::save_state::try_decode_state_chunk_v2;
 use crate::subsystem::world::GameData;
 
 #[cfg(target_os = "uefi")]
@@ -29,6 +31,26 @@ macro_rules! uefi_vm_stage {
 #[derive(Debug)]
 pub struct VmRunner {
     tm: ThreadManager,
+    #[cfg(feature = "hosted")]
+    trace: HostedTraceRing,
+}
+
+/// Compact, allocation-free-at-steady-state evidence for the last opcodes
+/// executed by a session. Shipping sessions leave the ring disabled, so the
+/// dispatch path performs neither an extra bytecode read nor a trace write.
+#[cfg(feature = "hosted")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedVmTraceRecord {
+    pub context_id: u32,
+    pub program_counter: u32,
+    pub opcode: u8,
+}
+
+#[cfg(feature = "hosted")]
+#[derive(Debug, Default)]
+struct HostedTraceRing {
+    capacity: usize,
+    records: VecDeque<HostedVmTraceRecord>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,7 +64,11 @@ pub struct VmTickReport {
 
 impl VmRunner {
     pub fn new(tm: ThreadManager) -> Self {
-        Self { tm }
+        Self {
+            tm,
+            #[cfg(feature = "hosted")]
+            trace: HostedTraceRing::default(),
+        }
     }
 
     pub fn thread_manager(&self) -> &ThreadManager {
@@ -51,6 +77,22 @@ impl VmRunner {
 
     pub fn thread_manager_mut(&mut self) -> &mut ThreadManager {
         &mut self.tm
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn set_hosted_trace_capacity(&mut self, capacity: usize) -> Result<()> {
+        const MAX_HOSTED_TRACE_RECORDS: usize = 65_536;
+        if capacity > MAX_HOSTED_TRACE_RECORDS {
+            anyhow::bail!("hosted trace capacity exceeds limit");
+        }
+        self.trace.capacity = capacity;
+        self.trace.records = VecDeque::with_capacity(capacity);
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn hosted_trace(&self) -> Vec<HostedVmTraceRecord> {
+        self.trace.records.iter().copied().collect()
     }
 
     pub fn start_main(&mut self, entry_point: u32) {
@@ -81,19 +123,28 @@ impl VmRunner {
             return Ok(VmTickReport::default());
         }
 
+        #[cfg(feature = "hosted")]
+        if game.save_manager.has_pending_host_operation() {
+            // Hosted file reads and state application belong to RfvpCore.
+            // Keep the request queued until the next host boundary.
+            return Ok(VmTickReport::default());
+        }
+
         // If a save capture is pending, snapshot the VM state now (on the VM thread) so the
         // render thread can serialize it without accessing the VM internals.
-        if game.save_manager.wants_vm_snapshot_capture()
-            && !game.save_manager.has_pending_vm_snapshot()
-        {
-            uefi_vm_stage!("[UEFI] VmRunner::tick before capture_snapshot_v1 pre");
-            let snap = self.tm.capture_snapshot_v1();
-            game.save_manager.set_pending_vm_snapshot(snap);
-            uefi_vm_stage!("[UEFI] VmRunner::tick after capture_snapshot_v1 pre");
+        if game.save_manager.wants_vm_snapshot_capture() {
+            if !game.save_manager.has_pending_vm_snapshot() {
+                let snap = self.tm.capture_snapshot_v1();
+                game.save_manager.set_pending_vm_snapshot(snap);
+            }
+            // The host must capture graphics/audio/globals at the same VM
+            // boundary. A second VM tick cannot run ahead of that capture.
+            return Ok(VmTickReport::default());
         }
 
         // Process deferred load requests at a safe point (between VM ticks).
         uefi_vm_stage!("[UEFI] VmRunner::tick before take_load_request");
+        #[cfg(not(feature = "hosted"))]
         if let Some(slot) = game.save_manager.take_load_request() {
             #[cfg(feature = "no_std")]
             {
@@ -116,10 +167,10 @@ impl VmRunner {
                             );
                         }
 
-                        match try_decode_state_chunk_v1(&bytes) {
+                        match try_decode_state_chunk_v2(&bytes) {
                             Ok(Some(s)) => {
                                 if let Err(e) = s.apply(game, &mut self.tm) {
-                                    log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e);
+                                    log::error!("load: apply SaveStateSnapshotV2 failed: {:#}", e);
                                 }
                             }
                             Ok(None) => {
@@ -183,6 +234,10 @@ impl VmRunner {
             uefi_vm_stage!("[UEFI] VmRunner::tick after advance_timers tid={}", tid);
 
             let status = self.tm.get_context_status(tid);
+            #[cfg(feature = "hosted")]
+            if status != ThreadState::CONTEXT_STATUS_NONE {
+                tracing::trace!(target: "rfvp::vm", event = "rfvp.vm.context.enter", context_id = tid, program_counter = self.tm.contexts[tid as usize].get_pc(), state = status.bits());
+            }
             uefi_vm_stage!(
                 "[UEFI] VmRunner::tick status tid={} bits={}",
                 tid,
@@ -196,7 +251,13 @@ impl VmRunner {
             {
                 uefi_vm_stage!("[UEFI] VmRunner::tick before run_one_context tid={}", tid);
                 self.run_one_context(tid, game, parser)?;
+                #[cfg(feature = "hosted")]
+                tracing::trace!(target: "rfvp::vm", event = "rfvp.vm.context.yield", context_id = tid, program_counter = self.tm.contexts[tid as usize].get_pc(), state = self.tm.get_context_status(tid).bits());
                 uefi_vm_stage!("[UEFI] VmRunner::tick after run_one_context tid={}", tid);
+                #[cfg(feature = "hosted")]
+                if game.save_manager.has_pending_host_operation() {
+                    break;
+                }
             }
         }
 
@@ -231,9 +292,11 @@ impl VmRunner {
             match req {
                 ThreadRequest::TextResume(id) => {
                     let mut st = self.tm.get_context_status(id);
-                    st.remove(ThreadState::CONTEXT_STATUS_TEXT);
-                    st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
-                    self.tm.set_context_status(id, st);
+                    if st.contains(ThreadState::CONTEXT_STATUS_TEXT) {
+                        st.remove(ThreadState::CONTEXT_STATUS_TEXT);
+                        st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
+                        self.tm.set_context_status(id, st);
+                    }
                 }
                 other => keep.push_back(other),
             }
@@ -338,7 +401,16 @@ impl VmRunner {
             tid
         );
         while !self.tm.get_context_should_break(tid) {
+            #[cfg(feature = "hosted")]
+            if game.inputs_manager.get_input_down() != 0 || game.inputs_manager.get_input_up() != 0
+            {
+                tracing::trace!(target: "rfvp::vm", event = "rfvp.vm.input.dispatch", context_id = tid, program_counter = self.tm.contexts[tid as usize].get_pc(), input_down = game.inputs_manager.get_input_down(), input_up = game.inputs_manager.get_input_up());
+            }
             uefi_vm_stage!("[UEFI] run_one_context before dispatch tid={}", tid);
+            #[cfg(feature = "hosted")]
+            self.record_hosted_opcode(tid, parser)?;
+            #[cfg(feature = "hosted")]
+            let instruction_pc = self.tm.contexts[tid as usize].get_pc();
             let result = self.tm.context_dispatch_opcode(tid, game, parser);
             uefi_vm_stage!("[UEFI] run_one_context after dispatch tid={}", tid);
 
@@ -348,7 +420,17 @@ impl VmRunner {
             }
 
             if let Err(e) = result {
-                // Preserve the previous "fail fast" behavior for now.
+                #[cfg(feature = "hosted")]
+                tracing::debug!(
+                    target: "rfvp::vm",
+                    event = "rfvp.vm.instruction.failed",
+                    context_id = tid,
+                    program_counter = instruction_pc,
+                    opcode = parser.read_u8(instruction_pc).ok(),
+                    syscall_id = (parser.read_u8(instruction_pc).ok() == Some(3))
+                        .then(|| parser.read_u16(instruction_pc + 1).ok()).flatten(),
+                );
+                #[cfg(not(feature = "hosted"))]
                 log::error!("Error while executing the script: {:#?}", e);
                 anyhow::bail!(e);
             }
@@ -358,7 +440,11 @@ impl VmRunner {
             // Drain all pending requests emitted by syscalls.
             while let Some(event) = game.thread_wrapper.pop() {
                 match event {
-                    ThreadRequest::Start(id, addr) => self.tm.thread_start(id, addr),
+                    ThreadRequest::Start(id, addr) => {
+                        game.motion_manager.text_manager.cancel_thread_waiters(id);
+                        game.thread_wrapper.cancel_text_requests(id);
+                        self.tm.thread_start(id, addr);
+                    }
                     ThreadRequest::Wait(time) => {
                         self.tm.thread_wait(time);
                         must_yield = true;
@@ -388,11 +474,18 @@ impl VmRunner {
                     }
                     ThreadRequest::TextResume(id) => {
                         let mut st = self.tm.get_context_status(id);
-                        st.remove(ThreadState::CONTEXT_STATUS_TEXT);
-                        st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
-                        self.tm.set_context_status(id, st);
+                        if st.contains(ThreadState::CONTEXT_STATUS_TEXT) {
+                            st.remove(ThreadState::CONTEXT_STATUS_TEXT);
+                            st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
+                            self.tm.set_context_status(id, st);
+                        }
                     }
                     ThreadRequest::Exit(id) => {
+                        let target = id.unwrap_or(tid);
+                        game.motion_manager
+                            .text_manager
+                            .cancel_thread_waiters(target);
+                        game.thread_wrapper.cancel_text_requests(target);
                         self.tm.thread_exit(id);
                         must_yield = true;
                     }
@@ -405,6 +498,8 @@ impl VmRunner {
                 }
             }
 
+            #[cfg(feature = "hosted")]
+            let must_yield = must_yield || game.save_manager.has_pending_host_operation();
             if must_yield {
                 // Force a per-context yield at frame boundary.
                 self.tm.set_context_should_break(tid, true);
@@ -414,4 +509,26 @@ impl VmRunner {
 
         Ok(())
     }
+
+    #[cfg(feature = "hosted")]
+    fn record_hosted_opcode(&mut self, tid: u32, parser: &Parser) -> Result<()> {
+        if self.trace.capacity == 0 {
+            return Ok(());
+        }
+        let program_counter = self.tm.contexts[tid as usize].get_pc();
+        let opcode = parser.read_u8(program_counter)?;
+        if self.trace.records.len() == self.trace.capacity {
+            self.trace.records.pop_front();
+        }
+        self.trace.records.push_back(HostedVmTraceRecord {
+            context_id: tid,
+            program_counter: u32::try_from(program_counter)
+                .map_err(|_| anyhow::anyhow!("hosted program counter exceeds u32"))?,
+            opcode,
+        });
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+mod tests;

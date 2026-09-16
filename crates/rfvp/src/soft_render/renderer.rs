@@ -61,6 +61,25 @@ impl SoftRenderer {
         &mut self.framebuffer
     }
 
+    /// Rebinds the renderer to a host-owned allocation without a framebuffer copy.
+    pub fn replace_framebuffer_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        pixels: Vec<u8>,
+    ) -> Result<Vec<u8>, SoftRenderError> {
+        let replacement = SoftFramebuffer::from_pixels(width, height, format, pixels)?;
+        self.virtual_size = (width, height);
+        Ok(core::mem::replace(&mut self.framebuffer, replacement).into_pixels())
+    }
+
+    /// Detaches the rendered allocation and restores a zero-sized placeholder.
+    pub fn take_framebuffer_pixels(&mut self) -> Result<Vec<u8>, SoftRenderError> {
+        let placeholder = SoftFramebuffer::new(0, 0, self.framebuffer.format())?;
+        Ok(core::mem::replace(&mut self.framebuffer, placeholder).into_pixels())
+    }
+
     pub fn stats(&self) -> SoftRendererStats {
         self.stats
     }
@@ -628,11 +647,7 @@ impl SoftRenderer {
         // The original engine's draw_color_tile() uses only the accumulated
         // parent position plus the tile's X/Y and W/H. Tile primitives do not
         // apply rotation, scale, pivot, or V3D.
-        let model = Mat4::from_translation(vec3(
-            parent_x + draw_x,
-            parent_y + draw_y,
-            0.0,
-        ));
+        let model = Mat4::from_translation(vec3(parent_x + draw_x, parent_y + draw_y, 0.0));
         let _ = self.draw_textured_quad(
             model,
             w,

@@ -1,4 +1,7 @@
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
+#[cfg(any(
+    feature = "hosted-gpu",
+    all(not(feature = "no_std"), feature = "gpu-render")
+))]
 pub(crate) mod gpu_prim;
 #[cfg(feature = "no_std")]
 pub(crate) mod prim_commands;

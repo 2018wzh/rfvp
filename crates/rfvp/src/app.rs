@@ -169,6 +169,8 @@ pub struct App {
     android_native_window: Option<NonNull<c_void>>,
 
     prim_renderer: GpuPrimRenderer,
+    #[cfg(not(target_arch = "wasm32"))]
+    mask_dissolve: crate::rfvp_render::mask::MaskDissolve,
     virtual_size: (u32, u32),
     render_tree: RenderTree,
     dissolve_vertex_buffer: wgpu::Buffer,
@@ -926,8 +928,7 @@ impl App {
 
                 // Mask dissolve (wait=4/5/6) is not a solid color quad in the original engine.
                 // It uses the 8-bit mask texture with alpha-test / blend states.
-                // Until a dedicated mask dissolve pipeline is implemented, do not draw a solid
-                // overlay here (otherwise it appears as a "white mask" over HUD/text).
+                // The native mask pass composites the previous frame separately.
                 DissolveType::MaskFadeIn
                 | DissolveType::MaskFadeInOut
                 | DissolveType::MaskFadeOut => None,
@@ -963,6 +964,19 @@ impl App {
                     label: Some("rfvp frame encoder"),
                 });
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let gd = gd_read(&self.game_data);
+            self.mask_dissolve
+                .prepare(
+                    &self.resources,
+                    &self.render_target,
+                    &gd.motion_manager,
+                    &mut encoder,
+                )
+                .map_err(anyhow::Error::msg)?;
+        }
+
         // Pass 1: render primitives into the virtual render target.
         {
             let mut pass = self
@@ -981,6 +995,9 @@ impl App {
                 &self.resources.pipelines.sprite,
                 proj,
             );
+
+            #[cfg(not(target_arch = "wasm32"))]
+            self.mask_dissolve.draw(&mut pass);
 
             let mk_fill_src = || VertexSource::VertexIndexBuffer {
                 vertex_buffer: &self.dissolve_vertex_buffer,
@@ -1134,7 +1151,7 @@ impl App {
 
             let mut gd = gd_write(&self.game_data);
             let nls = gd.get_nls();
-            let state_snap = crate::subsystem::save_state::SaveStateSnapshotV1::capture(&mut gd);
+            let state_snap = crate::subsystem::save_state::SaveStateSnapshotV2::capture(&mut gd);
 
             if slot == u32::MAX {
                 // SaveCreate(3, nil/int): prepare local_saved payload in memory.
@@ -1428,9 +1445,7 @@ impl App {
 
     pub fn set_text_hidpi_enabled(&mut self, enabled: bool) {
         let mut gd = gd_write(&self.game_data);
-        gd.motion_manager
-            .text_manager
-            .set_hidpi_enabled(enabled);
+        gd.motion_manager.text_manager.set_hidpi_enabled(enabled);
     }
 
     pub fn text_hidpi_enabled(&self) -> bool {
@@ -1661,7 +1676,6 @@ impl App {
                 _ => {}
             }
         }
-
     }
 
     /// Inject a mouse-button event from an iOS host.
@@ -1698,7 +1712,6 @@ impl App {
                 _ => {}
             }
         }
-
     }
 
     /// Inject a mouse-wheel event from an iOS host.
@@ -1721,7 +1734,6 @@ impl App {
             gd.inputs_manager.set_mouse_in(in_content);
             gd.inputs_manager.notify_mouse_wheel(delta);
         }
-
     }
 
     /// Inject a key event from an iOS host.
@@ -1749,7 +1761,6 @@ impl App {
                 _ => {}
             }
         }
-
     }
 
     /// Inject a single-finger touch event from an Android host.
@@ -1836,7 +1847,6 @@ impl App {
                 _ => {}
             }
         }
-
     }
 
     /// Recreate the presentation surface from a new `ANativeWindow*`.
@@ -2677,6 +2687,10 @@ impl AppBuilder {
                     ptr::addr_of_mut!((*p).wgpu_adapter).write(None);
                 }
                 ptr::addr_of_mut!((*p).prim_renderer).write(prim_renderer);
+                #[cfg(not(target_arch = "wasm32"))]
+                ptr::addr_of_mut!((*p).mask_dissolve).write(
+                    crate::rfvp_render::mask::MaskDissolve::new(&resources, self.size),
+                );
                 ptr::addr_of_mut!((*p).virtual_size).write(self.size);
                 ptr::addr_of_mut!((*p).render_tree).write(render_tree);
 
@@ -2862,6 +2876,10 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
 
                 ptr::addr_of_mut!((*p).prim_renderer).write(prim_renderer);
+                #[cfg(not(target_arch = "wasm32"))]
+                ptr::addr_of_mut!((*p).mask_dissolve).write(
+                    crate::rfvp_render::mask::MaskDissolve::new(&resources, self.size),
+                );
                 ptr::addr_of_mut!((*p).virtual_size).write(self.size);
                 ptr::addr_of_mut!((*p).render_tree).write(render_tree);
 
@@ -3073,6 +3091,10 @@ impl AppBuilder {
                     ptr::addr_of_mut!((*p).android_native_window).write(Some(native_window));
                 }
                 ptr::addr_of_mut!((*p).prim_renderer).write(prim_renderer);
+                #[cfg(not(target_arch = "wasm32"))]
+                ptr::addr_of_mut!((*p).mask_dissolve).write(
+                    crate::rfvp_render::mask::MaskDissolve::new(&resources, self.size),
+                );
                 ptr::addr_of_mut!((*p).virtual_size).write(self.size);
                 ptr::addr_of_mut!((*p).render_tree).write(render_tree);
 
@@ -3268,6 +3290,10 @@ impl AppBuilder {
                 }
 
                 ptr::addr_of_mut!((*p).prim_renderer).write(prim_renderer);
+                #[cfg(not(target_arch = "wasm32"))]
+                ptr::addr_of_mut!((*p).mask_dissolve).write(
+                    crate::rfvp_render::mask::MaskDissolve::new(&resources, self.size),
+                );
                 ptr::addr_of_mut!((*p).virtual_size).write(self.size);
                 ptr::addr_of_mut!((*p).render_tree).write(render_tree);
 

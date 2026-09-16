@@ -45,6 +45,11 @@ impl ThreadWrapper {
         self.requests.pop_front()
     }
 
+    #[cfg(feature = "hosted")]
+    pub(crate) fn pending_count(&self) -> usize {
+        self.requests.len()
+    }
+
     pub fn thread_start(&mut self, id: u32, addr: u32) {
         self.requests.push_back(ThreadRequest::Start(id, addr));
     }
@@ -75,6 +80,15 @@ impl ThreadWrapper {
 
     pub fn thread_text_resume(&mut self, id: u32) {
         self.requests.push_back(ThreadRequest::TextResume(id));
+    }
+
+    pub fn cancel_text_requests(&mut self, id: u32) {
+        self.requests.retain(|request| match request {
+            ThreadRequest::TextWait(target) | ThreadRequest::TextResume(target) => {
+                id != 0 && *target != id
+            }
+            _ => true,
+        });
     }
 
     pub fn thread_exit(&mut self, id: Option<u32>) {

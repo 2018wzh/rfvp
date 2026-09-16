@@ -35,8 +35,8 @@ use super::parts_manager::PartsManager;
 use super::parts_manager::PartsManagerSnapshotV1;
 use super::prim::{PrimManager, INVAILD_PRIM_HANDLE};
 use super::prim::{PrimManagerSnapshotV1, PrimSnapshotV1};
-use super::text_manager::{TextManager, TextSlotSurfaceUpdate};
 use super::text_manager::TextManagerSnapshotV1;
+use super::text_manager::{TextManager, TextSlotSurfaceUpdate};
 use crate::subsystem::resources::color_manager::ColorManager;
 use crate::subsystem::resources::prim::{Prim, PrimType};
 use anyhow::{bail, Result};
@@ -79,6 +79,8 @@ pub struct MotionManager {
     dissolve_mask_graph: GraphBuff,
     dissolve_duration_ms: u32,
     dissolve_elapsed_ms: u32,
+    // Renderer-local invalidation; not part of the native save codec.
+    dissolve_generation: u64,
     dissolve_alpha: f32,
     dissolve2: Dissolve2State,
 }
@@ -135,6 +137,7 @@ impl MotionManager {
             dissolve_mask_graph: GraphBuff::new(),
             dissolve_duration_ms: 0,
             dissolve_elapsed_ms: 0,
+            dissolve_generation: 0,
             dissolve_alpha: 0.0,
             dissolve2: Dissolve2State::new(),
         }
@@ -583,7 +586,7 @@ impl MotionManager {
             Err(_) => return Ok(()),
         };
 
-        if let Some(dest) = texture.get_texture_mut().as_mut() {
+        if let Some(dest) = texture.get_texture_mut() {
             let src_x = 0;
             let src_y = 0;
             let src_w = parts.get_width() as u32;
@@ -893,6 +896,7 @@ impl MotionManager {
     }
 
     pub fn start_dissolve(&mut self, duration_ms: u32, typ: DissolveType) {
+        self.dissolve_generation = self.dissolve_generation.wrapping_add(1);
         self.dissolve_duration_ms = duration_ms.max(1);
         self.dissolve_elapsed_ms = 0;
         self.dissolve_type = typ;
@@ -950,6 +954,18 @@ impl MotionManager {
 
     pub fn get_dissolve_alpha(&self) -> f32 {
         self.dissolve_alpha
+    }
+
+    pub fn dissolve_render_state(&self) -> (u64, u32) {
+        let range = if self.dissolve_type == DissolveType::MaskFadeInOut {
+            510
+        } else {
+            255
+        };
+        let phase = (self.dissolve_elapsed_ms as u64 * range
+            / self.dissolve_duration_ms.max(1) as u64)
+            .min(range);
+        (self.dissolve_generation, phase as u32)
     }
 
     // -----------------------------
@@ -1082,17 +1098,16 @@ impl MotionManager {
                 } else {
                     let (text_manager, textures) = (&self.text_manager, &mut self.textures);
                     if let Some(rgba) = text_manager.slot_rgba_bytes(slot) {
-                        textures[graph_id as usize]
-                            .load_text_from_buff_ref_with_display_size(
-                                rgba,
-                                info.width,
-                                info.height,
-                                info.display_width,
-                                info.display_height,
-                                info.origin_x_px,
-                                info.origin_y_px,
-                                info.raster_scale,
-                            )?;
+                        textures[graph_id as usize].load_text_from_buff_ref_with_display_size(
+                            rgba,
+                            info.width,
+                            info.height,
+                            info.display_width,
+                            info.display_height,
+                            info.origin_x_px,
+                            info.origin_y_px,
+                            info.raster_scale,
+                        )?;
                     } else {
                         return Ok(());
                     }
@@ -1102,7 +1117,6 @@ impl MotionManager {
         }
         Ok(())
     }
-
 }
 
 impl MotionManager {
@@ -1182,7 +1196,16 @@ pub struct Dissolve2SnapshotV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MotionManagerSnapshotV1 {
+pub struct MotionManagerSnapshotV2 {
+    alpha_motion_container: AlphaMotionContainer,
+    move_motion_container: MoveMotionContainer,
+    rotation_motion_container: RotationMotionContainer,
+    scale_motion_container: ScaleMotionContainer,
+    z_motion_container: ZMotionContainer,
+    v3d_motion_container: V3dMotionContainer,
+    sprite_anim_container: SpriteAnimContainer,
+    snow_motion_container: SnowMotionContainer,
+    lip_motion_container: LipMotionContainer,
     pub color_manager: ColorManager,
     pub prim_manager: PrimManagerSnapshotV1,
     pub textures: Vec<GraphBuffSnapshotV1>,
@@ -1194,7 +1217,7 @@ pub struct MotionManagerSnapshotV1 {
 }
 
 impl MotionManager {
-    pub fn capture_snapshot_v1(&self) -> MotionManagerSnapshotV1 {
+    pub fn capture_snapshot_v2(&self) -> MotionManagerSnapshotV2 {
         let mut textures: Vec<GraphBuffSnapshotV1> = Vec::new();
         for (id, gb) in self.textures.iter().enumerate() {
             // Text surfaces are rebuilt from TextManager state after load. Omitting the reserved
@@ -1229,7 +1252,16 @@ impl MotionManager {
             pending_fade_out: d2.pending_fade_out,
         };
 
-        MotionManagerSnapshotV1 {
+        MotionManagerSnapshotV2 {
+            alpha_motion_container: self.alpha_motion_container.clone(),
+            move_motion_container: self.move_motion_container.clone(),
+            rotation_motion_container: self.rotation_motion_container.clone(),
+            scale_motion_container: self.scale_motion_container.clone(),
+            z_motion_container: self.z_motion_container.clone(),
+            v3d_motion_container: self.v3d_motion_container.clone(),
+            sprite_anim_container: self.sprite_anim_container.clone(),
+            snow_motion_container: self.snow_motion_container.clone(),
+            lip_motion_container: self.lip_motion_container.clone(),
             color_manager: self.color_manager.clone(),
             prim_manager: self.prim_manager.capture_snapshot_v1(),
             textures,
@@ -1241,11 +1273,31 @@ impl MotionManager {
         }
     }
 
-    pub fn apply_snapshot_v1(
+    pub fn apply_snapshot_v2(
         &mut self,
-        snap: &MotionManagerSnapshotV1,
+        snap: &MotionManagerSnapshotV2,
         vfs: &super::vfs::Vfs,
     ) -> Result<()> {
+        let mut texture_ids = [false; 4096];
+        for texture in &snap.textures {
+            let Some(seen) = texture_ids.get_mut(usize::from(texture.id)) else {
+                anyhow::bail!("texture slot is out of range in motion snapshot");
+            };
+            if *seen {
+                anyhow::bail!("duplicate texture slot in motion snapshot");
+            }
+            *seen = true;
+        }
+        let dissolve_type = match snap.dissolve1.dissolve_type {
+            0 => DissolveType::None,
+            1 => DissolveType::Static,
+            2 => DissolveType::ColoredFadeIn,
+            3 => DissolveType::ColoredFadeOut,
+            4 => DissolveType::MaskFadeIn,
+            5 => DissolveType::MaskFadeInOut,
+            6 => DissolveType::MaskFadeOut,
+            _ => anyhow::bail!("invalid dissolve type in motion snapshot"),
+        };
         self.color_manager = snap.color_manager.clone();
         self.prim_manager.apply_snapshot_v1(&snap.prim_manager);
 
@@ -1258,9 +1310,7 @@ impl MotionManager {
         }
         for t in &snap.textures {
             let id = t.id as usize;
-            if id < self.textures.len() {
-                self.textures[id].apply_snapshot_v1(t, vfs)?;
-            }
+            self.textures[id].apply_snapshot_v1(t, vfs)?;
         }
 
         self.text_manager.apply_snapshot_v1(&snap.text_manager);
@@ -1272,12 +1322,7 @@ impl MotionManager {
             .apply_snapshot_v1(&snap.gaiji_manager, vfs)?;
 
         // Dissolve 1
-        self.dissolve_type = match snap.dissolve1.dissolve_type {
-            1 => DissolveType::Static,
-            2 => DissolveType::ColoredFadeIn,
-            3 => DissolveType::ColoredFadeOut,
-            _ => DissolveType::None,
-        };
+        self.dissolve_type = dissolve_type;
         self.dissolve_color_id = snap.dissolve1.dissolve_color_id;
         self.dissolve_duration_ms = snap.dissolve1.dissolve_duration_ms;
         self.dissolve_elapsed_ms = snap.dissolve1.dissolve_elapsed_ms;
@@ -1297,16 +1342,16 @@ impl MotionManager {
                 pending_fade_out: snap.dissolve2.pending_fade_out,
             });
 
-        // Stop time-based motions on load. Scene state (prims/textures/text) is already restored,
-        // but resuming in-flight motions without accurate timestamps causes more harm than good.
-        self.alpha_motion_container = AlphaMotionContainer::new();
-        self.move_motion_container = MoveMotionContainer::new();
-        self.rotation_motion_container = RotationMotionContainer::new();
-        self.scale_motion_container = ScaleMotionContainer::new();
-        self.z_motion_container = ZMotionContainer::new();
-        self.v3d_motion_container = V3dMotionContainer::new();
-        self.sprite_anim_container = SpriteAnimContainer::new();
-        self.snow_motion_container = SnowMotionContainer::new();
+        // Resume the native containers at their saved elapsed time.
+        self.alpha_motion_container = snap.alpha_motion_container.clone();
+        self.move_motion_container = snap.move_motion_container.clone();
+        self.rotation_motion_container = snap.rotation_motion_container.clone();
+        self.scale_motion_container = snap.scale_motion_container.clone();
+        self.z_motion_container = snap.z_motion_container.clone();
+        self.v3d_motion_container = snap.v3d_motion_container.clone();
+        self.sprite_anim_container = snap.sprite_anim_container.clone();
+        self.snow_motion_container = snap.snow_motion_container.clone();
+        self.lip_motion_container = snap.lip_motion_container.clone();
 
         Ok(())
     }

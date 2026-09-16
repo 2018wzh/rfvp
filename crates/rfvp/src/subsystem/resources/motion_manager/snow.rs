@@ -6,7 +6,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SnowFlake {
     /// dword0 in original: variant index (uint)
     pub variant_idx: u32,
@@ -24,9 +24,11 @@ impl SnowFlake {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnowMotion {
+    #[serde(with = "fixed_flake_array")]
     pub flakes: [SnowFlake; 1024], // 0x0000 .. 0x3FFF (16 * 1024 = 16384)
+    #[serde(with = "fixed_flake_array")]
     pub flake_ptrs: [usize; 1024], // 0x4000 .. 0x4FFF (store indices 0..1023)
     // control area (starting ~0x5000)
     pub enabled: bool, // byte at 0x5000 (we use u8's LOBYTE)
@@ -48,6 +50,27 @@ pub struct SnowMotion {
     pub color_r: i32,           // dword @ 0x503C (5135) (likely)
     pub color_g: i32,           // dword @ 0x5040 (5136) (likely)
     pub color_b_or_extra: i32,  // dword @ 0x5044 (5137) (likely)
+}
+
+mod fixed_flake_array {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(
+        values: &[T; 1024],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        values.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[T; 1024], D::Error> {
+        let values = Vec::<T>::deserialize(deserializer)?;
+        values.try_into().map_err(|values: Vec<T>| {
+            serde::de::Error::invalid_length(values.len(), &"exactly 1024 entries")
+        })
+    }
 }
 
 impl SnowMotion {
@@ -551,6 +574,7 @@ impl SnowMotion {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnowMotionContainer {
     motion: Vec<SnowMotion>,
 }

@@ -3,13 +3,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::host_api::{
-    AudioParams, AudioStreamDesc, AudioStreamId, DrawSolidCommand, DrawSpriteCommand, RfvpAudio,
-    RfvpError, RfvpHost, RfvpLogLevel, RfvpRenderer, RfvpResult, TextureDesc, TextureId,
-    TextureRect,
+    AudioParams, AudioStreamDesc, AudioStreamId, DrawSolidCommand, DrawSpriteCommand,
+    HostedPixelBuffer, PixelBuffer, RfvpAudio, RfvpError, RfvpHost, RfvpLogLevel, RfvpRenderer,
+    RfvpResult, TextureDesc, TextureId, TextureRect,
 };
 
-use super::values::Variant;
 use super::subsystem::PortableSubsystem;
+use super::values::Variant;
 use super::vm::{ThreadRequest, VmError, VmResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,22 +22,57 @@ pub struct NativeCallSite {
 
 pub enum NativeSyscall {
     Immediate(Variant),
-    ThreadStart { id: u32, address: u32 },
-    ThreadWait { ms: u32 },
-    ThreadSleep { ms: u32 },
-    ThreadRaise { ms: u32 },
+    ThreadStart {
+        id: u32,
+        address: u32,
+    },
+    ThreadWait {
+        ms: u32,
+    },
+    ThreadSleep {
+        ms: u32,
+    },
+    ThreadRaise {
+        ms: u32,
+    },
     ThreadNext,
-    ThreadExit { id: Option<u32> },
+    ThreadExit {
+        id: Option<u32>,
+    },
     RenderSprite(DrawSpriteCommand),
     RenderSolid(DrawSolidCommand),
-    CreateTexture { id: TextureId, desc: TextureDesc, pixels: Vec<u8> },
-    UpdateTexture { id: TextureId, rect: TextureRect, pixels: Vec<u8> },
-    DestroyTexture { id: TextureId },
-    AudioCreateStream { id: AudioStreamId, desc: AudioStreamDesc },
-    AudioPlay { id: AudioStreamId, params: AudioParams },
-    AudioStop { id: AudioStreamId, fade_ms: u32 },
-    Log { level: RfvpLogLevel, message: String },
-    Unsupported { reason: String },
+    CreateTexture {
+        id: TextureId,
+        desc: TextureDesc,
+        pixels: Vec<u8>,
+    },
+    UpdateTexture {
+        id: TextureId,
+        rect: TextureRect,
+        pixels: Vec<u8>,
+    },
+    DestroyTexture {
+        id: TextureId,
+    },
+    AudioCreateStream {
+        id: AudioStreamId,
+        desc: AudioStreamDesc,
+    },
+    AudioPlay {
+        id: AudioStreamId,
+        params: AudioParams,
+    },
+    AudioStop {
+        id: AudioStreamId,
+        fade_ms: u32,
+    },
+    Log {
+        level: RfvpLogLevel,
+        message: String,
+    },
+    Unsupported {
+        reason: String,
+    },
 }
 
 pub struct PortableNativeBridge<'a, H: RfvpHost> {
@@ -59,11 +94,7 @@ impl<'a, H: RfvpHost> PortableNativeBridge<'a, H> {
         core::mem::take(&mut self.requests)
     }
 
-    pub fn syscall(
-        &mut self,
-        call_site: NativeCallSite,
-        args: Vec<Variant>,
-    ) -> VmResult<Variant> {
+    pub fn syscall(&mut self, call_site: NativeCallSite, args: Vec<Variant>) -> VmResult<Variant> {
         match self.decode_syscall(&call_site, args)? {
             NativeSyscall::Immediate(value) => Ok(value),
             NativeSyscall::ThreadStart { id, address } => {
@@ -91,24 +122,38 @@ impl<'a, H: RfvpHost> PortableNativeBridge<'a, H> {
                 Ok(Variant::Nil)
             }
             NativeSyscall::RenderSprite(command) => {
-                self.host.renderer().draw_sprite(&command).map_err(host_error)?;
+                self.host
+                    .renderer()
+                    .draw_sprite(&command)
+                    .map_err(host_error)?;
                 Ok(Variant::Nil)
             }
             NativeSyscall::RenderSolid(command) => {
-                self.host.renderer().draw_solid(&command).map_err(host_error)?;
+                self.host
+                    .renderer()
+                    .draw_solid(&command)
+                    .map_err(host_error)?;
                 Ok(Variant::Nil)
             }
             NativeSyscall::CreateTexture { id, desc, pixels } => {
                 self.host
                     .renderer()
-                    .create_texture(id, desc, Some(&pixels))
+                    .create_texture(
+                        id,
+                        desc,
+                        Some(PixelBuffer::Owned(HostedPixelBuffer::from_bytes(pixels))),
+                    )
                     .map_err(host_error)?;
                 Ok(Variant::Nil)
             }
             NativeSyscall::UpdateTexture { id, rect, pixels } => {
                 self.host
                     .renderer()
-                    .update_texture(id, rect, &pixels)
+                    .update_texture(
+                        id,
+                        rect,
+                        PixelBuffer::Owned(HostedPixelBuffer::from_bytes(pixels)),
+                    )
                     .map_err(host_error)?;
                 Ok(Variant::Nil)
             }
@@ -117,7 +162,10 @@ impl<'a, H: RfvpHost> PortableNativeBridge<'a, H> {
                 Ok(Variant::Nil)
             }
             NativeSyscall::AudioCreateStream { id, desc } => {
-                self.host.audio().create_stream(id, desc).map_err(host_error)?;
+                self.host
+                    .audio()
+                    .create_stream(id, desc)
+                    .map_err(host_error)?;
                 Ok(Variant::Nil)
             }
             NativeSyscall::AudioPlay { id, params } => {
@@ -147,8 +195,13 @@ impl<'a, H: RfvpHost> PortableNativeBridge<'a, H> {
         call_site: &NativeCallSite,
         args: Vec<Variant>,
     ) -> VmResult<NativeSyscall> {
-        if let Some(result) = self.subsystem.syscall(self.host, &call_site.syscall_name, &args) {
-            return result.map(|value| NativeSyscall::Immediate(value)).map_err(host_error);
+        if let Some(result) = self
+            .subsystem
+            .syscall(self.host, &call_site.syscall_name, &args)
+        {
+            return result
+                .map(|value| NativeSyscall::Immediate(value))
+                .map_err(host_error);
         }
         match call_site.syscall_name.as_str() {
             "ThreadStart" => Ok(NativeSyscall::ThreadStart {
@@ -185,17 +238,15 @@ impl<'a, H: RfvpHost> PortableNativeBridge<'a, H> {
 }
 
 fn arg_i32(args: &[Variant], index: usize, call_site: &NativeCallSite) -> VmResult<i32> {
-    args.get(index)
-        .and_then(Variant::as_int)
-        .ok_or_else(|| {
-            VmError::missing_native(
-                call_site.syscall_name.clone(),
-                call_site.syscall_id,
-                call_site.pc,
-                call_site.thread_id,
-                format!("argument {} is not an integer", index),
-            )
-        })
+    args.get(index).and_then(Variant::as_int).ok_or_else(|| {
+        VmError::missing_native(
+            call_site.syscall_name.clone(),
+            call_site.syscall_id,
+            call_site.pc,
+            call_site.thread_id,
+            format!("argument {} is not an integer", index),
+        )
+    })
 }
 
 fn host_error(err: RfvpError) -> VmError {

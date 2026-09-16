@@ -1,6 +1,8 @@
 use super::error::RfvpResult;
 use alloc::vec::Vec;
 
+use super::RfvpError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioStreamId(pub u32);
 
@@ -76,6 +78,15 @@ impl Default for AudioParams {
 }
 
 pub trait RfvpAudio {
+    fn load_resource(
+        &mut self,
+        _id: AudioStreamId,
+        _kind: EncodedAudioKind,
+        _resource_uri: &str,
+    ) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
     fn load_encoded(
         &mut self,
         id: AudioStreamId,
@@ -83,11 +94,33 @@ pub trait RfvpAudio {
         bytes: &[u8],
     ) -> RfvpResult<()>;
 
+    /// Transfers an already-owned encoded payload to the host. Backends that
+    /// retain payloads should override this method so the allocation crosses
+    /// the hosted boundary exactly once.
+    fn load_encoded_owned(
+        &mut self,
+        id: AudioStreamId,
+        kind: EncodedAudioKind,
+        bytes: Vec<u8>,
+    ) -> RfvpResult<()> {
+        self.load_encoded(id, kind, &bytes)
+    }
+
     fn create_stream(&mut self, id: AudioStreamId, desc: AudioStreamDesc) -> RfvpResult<()>;
 
     fn submit_i16(&mut self, id: AudioStreamId, samples: &[i16]) -> RfvpResult<()>;
 
+    /// Transfers an already-owned PCM block to the host. The default keeps
+    /// existing backends source-compatible; retaining hosts must override it.
+    fn submit_i16_owned(&mut self, id: AudioStreamId, samples: Vec<i16>) -> RfvpResult<()> {
+        self.submit_i16(id, &samples)
+    }
+
     fn submit_f32(&mut self, id: AudioStreamId, samples: &[f32]) -> RfvpResult<()>;
+
+    fn submit_f32_owned(&mut self, id: AudioStreamId, samples: Vec<f32>) -> RfvpResult<()> {
+        self.submit_f32(id, &samples)
+    }
 
     fn play(&mut self, id: AudioStreamId, params: AudioParams, fade_in_ms: u32) -> RfvpResult<()>;
 
@@ -104,6 +137,17 @@ pub trait RfvpAudio {
     fn destroy_stream(&mut self, id: AudioStreamId);
 
     fn tick(&mut self, delta_us: u64) -> RfvpResult<()>;
+
+    /// Returns the backend's current playback state for a logical stream.
+    ///
+    /// Hosted cores use this at the start of a tick to reconcile the script's
+    /// `AudioState`/wait predicates with the mixer.  A backend that cannot
+    /// report completion must reject the query instead of allowing the core
+    /// to keep a stale `playing` bit forever.
+    #[cfg(feature = "hosted")]
+    fn is_playing(&mut self, _id: AudioStreamId) -> RfvpResult<bool> {
+        Err(RfvpError::Unsupported)
+    }
 }
 
 pub trait SoftAudioVorbis {
@@ -211,6 +255,27 @@ impl<B: SoftAudioVorbis> SoftAudioMixer<B> {
 
     pub const fn config(&self) -> SoftAudioConfig {
         self.config
+    }
+
+    /// Reports whether the mixer currently has an audible, non-paused voice
+    /// for `id`. A voice that is fading out is no longer considered playing:
+    /// the logical stop has already happened even though the final samples
+    /// still drain through the backend.
+    #[cfg(feature = "hosted")]
+    pub fn is_playing(&self, id: AudioStreamId) -> bool {
+        self.voices
+            .iter()
+            .any(|voice| voice.id == id && matches!(voice.state, VoiceState::Playing))
+    }
+
+    /// Number of voices charged against the configured capacity for this kind.
+    /// Includes paused and fading-out voices until they are actually removed.
+    #[cfg(feature = "hosted")]
+    pub fn voice_count(&self, kind: AudioSlotKind) -> usize {
+        self.voices
+            .iter()
+            .filter(|voice| voice.kind == kind)
+            .count()
     }
 
     pub fn load_encoded(
@@ -627,8 +692,10 @@ impl<B: SoftAudioVorbis> Drop for SoftAudioMixer<B> {
 }
 
 fn is_ogg(kind: EncodedAudioKind, bytes: &[u8]) -> bool {
-    kind == EncodedAudioKind::Ogg
-        || (kind == EncodedAudioKind::Unknown && bytes.len() >= 4 && &bytes[0..4] == b"OggS")
+    matches!(
+        kind,
+        EncodedAudioKind::Ogg | EncodedAudioKind::Mp3 | EncodedAudioKind::Flac
+    ) || (kind == EncodedAudioKind::Unknown && bytes.len() >= 4 && &bytes[0..4] == b"OggS")
 }
 
 fn phase_step(source_rate: u32, output_rate: u32) -> RfvpResult<u64> {

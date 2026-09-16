@@ -16,12 +16,17 @@ pub struct RenderTargetReadback {
 impl RenderTargetReadback {
     // get pixels as RGBA8 slice
     pub fn map_to_rgba8(&self, device: &wgpu::Device) -> Vec<u8> {
+        self.try_map_to_rgba8(device)
+            .expect("render target readback failed")
+    }
+
+    pub fn try_map_to_rgba8(&self, device: &wgpu::Device) -> Result<Vec<u8>, &'static str> {
         let height = self.height as usize;
         let dst_bpr = self.bytes_per_row as usize;
         let src_bpr = self.padded_bytes_per_row as usize;
 
         if height == 0 || dst_bpr == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let slice = self.buffer.slice(..);
@@ -32,13 +37,24 @@ impl RenderTargetReadback {
             let _ = tx.send(res);
         });
 
-        // Ensure the mapping completes.
-        device.poll(wgpu::Maintain::Wait);
-
-        // Propagate mapping failure loudly (you can change to Result if preferred).
-        rx.recv()
-            .expect("map_async callback dropped")
-            .expect("buffer map failed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            device.poll(wgpu::Maintain::Poll);
+            match rx.try_recv() {
+                Ok(Ok(())) => break,
+                Ok(Err(_)) => return Err("RFVP_GPU_READBACK_FAILED"),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err("RFVP_GPU_READBACK_DISCONNECTED")
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        self.buffer.unmap();
+                        return Err("RFVP_GPU_READBACK_TIMEOUT");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
 
         let mapped = slice.get_mapped_range();
 
@@ -55,7 +71,7 @@ impl RenderTargetReadback {
         drop(mapped);
         self.buffer.unmap();
 
-        out
+        Ok(out)
     }
 }
 
@@ -212,6 +228,23 @@ impl RenderTarget {
 
     pub fn backing_size(&self) -> (u32, u32) {
         self.size
+    }
+
+    pub fn logical_size(&self) -> (u32, u32) {
+        self.logical_size
+    }
+
+    pub fn copy_to(&self, encoder: &mut wgpu::CommandEncoder, target: &Self) {
+        assert_eq!(self.size, target.size, "render target copy dimensions");
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            target.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.size.0,
+                height: self.size.1,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     pub fn vertex_source<'a>(&'a self) -> VertexSource<'a> {
