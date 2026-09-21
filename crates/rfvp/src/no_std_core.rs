@@ -142,6 +142,75 @@ mod hosted_input_tests {
         core.game_data.inputs_manager.begin_frame();
         assert_ne!(core.game_data.inputs_manager.get_input_down(), 0);
     }
+
+    #[test]
+    fn hosted_focus_flushes_state_and_suppresses_only_activation_click() {
+        let mut core = RfvpCore::new(RfvpCoreConfig::default());
+        core.push_event(RfvpEvent::KeyDown {
+            key: HostKeyCode::Return,
+            repeat: false,
+            modifiers: InputModifiers::empty(),
+        })
+        .unwrap();
+        core.apply_pending_events_to_game_data();
+        core.pending_events.clear();
+        core.game_data.inputs_manager.begin_frame();
+        assert_ne!(core.game_data.inputs_manager.get_input_state(), 0);
+
+        core.push_event(RfvpEvent::FocusLost).unwrap();
+        core.apply_pending_events_to_game_data();
+        core.pending_events.clear();
+        core.game_data.inputs_manager.begin_frame();
+        assert_eq!(core.game_data.inputs_manager.get_input_state(), 0);
+        assert_eq!(core.game_data.inputs_manager.get_input_down(), 0);
+        assert_eq!(core.game_data.inputs_manager.get_input_up(), 0);
+
+        core.push_event(RfvpEvent::FocusGained).unwrap();
+        core.apply_pending_events_to_game_data();
+        core.pending_events.clear();
+        assert!(core.game_data.inputs_manager.get_cursor_in());
+        core.push_event(RfvpEvent::PointerMove {
+            x: 120,
+            y: 80,
+            in_screen: true,
+        })
+        .unwrap();
+        core.push_event(RfvpEvent::PointerDown {
+            button: crate::host_api::PointerButton::Left,
+            x: 120,
+            y: 80,
+        })
+        .unwrap();
+        core.push_event(RfvpEvent::PointerUp {
+            button: crate::host_api::PointerButton::Left,
+            x: 120,
+            y: 80,
+        })
+        .unwrap();
+        core.apply_pending_events_to_game_data();
+        core.pending_events.clear();
+        core.game_data.inputs_manager.begin_frame();
+        assert_eq!(core.game_data.inputs_manager.get_input_down(), 0);
+        assert_eq!(core.game_data.inputs_manager.get_input_up(), 0);
+
+        core.push_event(RfvpEvent::PointerDown {
+            button: crate::host_api::PointerButton::Left,
+            x: 120,
+            y: 80,
+        })
+        .unwrap();
+        core.push_event(RfvpEvent::PointerUp {
+            button: crate::host_api::PointerButton::Left,
+            x: 120,
+            y: 80,
+        })
+        .unwrap();
+        core.apply_pending_events_to_game_data();
+        core.pending_events.clear();
+        core.game_data.inputs_manager.begin_frame();
+        assert_ne!(core.game_data.inputs_manager.get_input_down(), 0);
+        assert_ne!(core.game_data.inputs_manager.get_input_up(), 0);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1070,6 +1139,14 @@ impl RfvpCore {
                 }
                 RfvpEvent::Wheel { delta_y, .. } => {
                     self.game_data.inputs_manager.notify_mouse_wheel(delta_y);
+                }
+                RfvpEvent::FocusLost => {
+                    self.game_data.inputs_manager.set_flash();
+                }
+                RfvpEvent::FocusGained => {
+                    self.game_data.inputs_manager.set_flash();
+                    self.game_data.inputs_manager.suppress_next_mouse_click();
+                    self.game_data.inputs_manager.set_mouse_in(true);
                 }
                 _ => {}
             }
