@@ -74,6 +74,9 @@ fn err_to_status(err: rfvp::host_api::RfvpError) -> i32 {
         rfvp::host_api::RfvpError::Io => rfvp_psv::PsvStatus::Io.as_i32(),
         rfvp::host_api::RfvpError::NotFound => rfvp_psv::PsvStatus::NotFound.as_i32(),
         rfvp::host_api::RfvpError::InvalidData => rfvp_psv::PsvStatus::InvalidData.as_i32(),
+        rfvp::host_api::RfvpError::UnsupportedSnapshotVersion => {
+            rfvp_psv::PsvStatus::InvalidData.as_i32()
+        }
         rfvp::host_api::RfvpError::InvalidArgument => rfvp_psv::PsvStatus::InvalidArgument.as_i32(),
         rfvp::host_api::RfvpError::Unsupported => rfvp_psv::PsvStatus::Unsupported.as_i32(),
         rfvp::host_api::RfvpError::OutOfMemory => rfvp_psv::PsvStatus::OutOfMemory.as_i32(),

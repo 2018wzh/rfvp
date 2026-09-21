@@ -164,6 +164,7 @@ unsafe extern "C" fn enumerate_visitor_bridge(
             RfvpError::Io => WiiStatus::Io.as_i32(),
             RfvpError::NotFound => WiiStatus::NotFound.as_i32(),
             RfvpError::InvalidData => WiiStatus::InvalidData.as_i32(),
+            RfvpError::UnsupportedSnapshotVersion => WiiStatus::InvalidData.as_i32(),
             RfvpError::InvalidArgument => WiiStatus::InvalidArgument.as_i32(),
             RfvpError::Unsupported => WiiStatus::Unsupported.as_i32(),
             RfvpError::OutOfMemory => WiiStatus::OutOfMemory.as_i32(),

@@ -164,6 +164,7 @@ unsafe extern "C" fn enumerate_visitor_bridge(
             RfvpError::Io => ThreeDsStatus::Io.as_i32(),
             RfvpError::NotFound => ThreeDsStatus::NotFound.as_i32(),
             RfvpError::InvalidData => ThreeDsStatus::InvalidData.as_i32(),
+            RfvpError::UnsupportedSnapshotVersion => ThreeDsStatus::InvalidData.as_i32(),
             RfvpError::InvalidArgument => ThreeDsStatus::InvalidArgument.as_i32(),
             RfvpError::Unsupported => ThreeDsStatus::Unsupported.as_i32(),
             RfvpError::OutOfMemory => ThreeDsStatus::OutOfMemory.as_i32(),

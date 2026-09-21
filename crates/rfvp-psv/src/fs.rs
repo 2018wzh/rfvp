@@ -179,6 +179,7 @@ fn rfvp_error_to_psv_status(err: RfvpError) -> i32 {
         RfvpError::Io => crate::status::PsvStatus::Io.as_i32(),
         RfvpError::NotFound => crate::status::PsvStatus::NotFound.as_i32(),
         RfvpError::InvalidData => crate::status::PsvStatus::InvalidData.as_i32(),
+        RfvpError::UnsupportedSnapshotVersion => crate::status::PsvStatus::InvalidData.as_i32(),
         RfvpError::InvalidArgument => crate::status::PsvStatus::InvalidArgument.as_i32(),
         RfvpError::Unsupported => crate::status::PsvStatus::Unsupported.as_i32(),
         RfvpError::OutOfMemory => crate::status::PsvStatus::OutOfMemory.as_i32(),

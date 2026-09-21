@@ -126,6 +126,9 @@ pub unsafe extern "C" fn rfvp_psv_app_run_empty_frame(app: *mut PsvApp) -> i32 {
             rfvp::host_api::RfvpError::InvalidData => {
                 crate::status::PsvStatus::InvalidData.as_i32()
             }
+            rfvp::host_api::RfvpError::UnsupportedSnapshotVersion => {
+                crate::status::PsvStatus::InvalidData.as_i32()
+            }
             rfvp::host_api::RfvpError::InvalidArgument => {
                 crate::status::PsvStatus::InvalidArgument.as_i32()
             }
@@ -182,6 +185,9 @@ fn err_to_status(err: rfvp::host_api::RfvpError) -> i32 {
         rfvp::host_api::RfvpError::Io => crate::status::PsvStatus::Io.as_i32(),
         rfvp::host_api::RfvpError::NotFound => crate::status::PsvStatus::NotFound.as_i32(),
         rfvp::host_api::RfvpError::InvalidData => crate::status::PsvStatus::InvalidData.as_i32(),
+        rfvp::host_api::RfvpError::UnsupportedSnapshotVersion => {
+            crate::status::PsvStatus::InvalidData.as_i32()
+        }
         rfvp::host_api::RfvpError::InvalidArgument => {
             crate::status::PsvStatus::InvalidArgument.as_i32()
         }

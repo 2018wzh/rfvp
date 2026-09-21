@@ -29,7 +29,9 @@ use crate::subsystem::resources::text_manager::SystemFontBindings;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
 #[cfg(feature = "hosted")]
-use crate::subsystem::save_state::{try_decode_state_chunk_v2, SaveStateSnapshotV2};
+use crate::subsystem::save_state::{
+    try_decode_state_chunk_v2, SaveStateSnapshotV2, UnsupportedSnapshotVersion,
+};
 use crate::subsystem::world::GameData;
 #[cfg(feature = "hosted")]
 use crate::vm_runner::HostedVmTraceRecord;
@@ -848,7 +850,13 @@ impl RfvpCore {
             .load_slot_into_current_from_bytes(slot, nls, &bytes)
             .map_err(|_| RfvpError::InvalidData)?;
         let snapshot = try_decode_state_chunk_v2(&bytes)
-            .map_err(|_| RfvpError::InvalidData)?
+            .map_err(|error| {
+                if error.downcast_ref::<UnsupportedSnapshotVersion>().is_some() {
+                    RfvpError::UnsupportedSnapshotVersion
+                } else {
+                    RfvpError::InvalidData
+                }
+            })?
             .ok_or(RfvpError::InvalidData)?;
         snapshot.trace_text_state("restore");
         let vm_runner = self.vm_runner.as_mut().ok_or(RfvpError::InvalidData)?;

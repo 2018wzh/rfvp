@@ -66,6 +66,7 @@ pub const fn rfvp_error_to_status(err: RfvpError) -> i32 {
         RfvpError::Io => Ps2Status::Io.as_i32(),
         RfvpError::NotFound => Ps2Status::NotFound.as_i32(),
         RfvpError::InvalidData => Ps2Status::InvalidData.as_i32(),
+        RfvpError::UnsupportedSnapshotVersion => Ps2Status::InvalidData.as_i32(),
         RfvpError::InvalidArgument => Ps2Status::InvalidArgument.as_i32(),
         RfvpError::Unsupported => Ps2Status::Unsupported.as_i32(),
         RfvpError::OutOfMemory => Ps2Status::OutOfMemory.as_i32(),

@@ -6,6 +6,7 @@ pub fn horizon_status_to_result_code(err: RfvpError) -> ResultCode {
         RfvpError::Io => ResultCode::new(0x2430_0001),
         RfvpError::NotFound => ResultCode::new(0x2430_0002),
         RfvpError::InvalidData => ResultCode::new(0x2430_0003),
+        RfvpError::UnsupportedSnapshotVersion => ResultCode::new(0x2430_0003),
         RfvpError::InvalidArgument => ResultCode::new(0x2430_0004),
         RfvpError::OutOfMemory => ResultCode::new(0x2430_0006),
         RfvpError::CapacityExceeded => ResultCode::new(0x2430_0007),

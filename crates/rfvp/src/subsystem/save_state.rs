@@ -9,6 +9,7 @@ use alloc::{
 use anyhow::{bail, Context, Result};
 #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 use bincode::Options;
+use core::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_player::{BgmPlayerSnapshotV1, SePlayerSnapshotV1};
@@ -22,6 +23,17 @@ use crate::subsystem::world::GameData;
 const SAVE_STATE_MAGIC: [u8; 4] = *b"RFVS";
 const SAVE_STATE_FOOTER_LEN: usize = 8; // u32 payload_len + 4-byte magic
 const MAX_STATE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnsupportedSnapshotVersion(pub(crate) u16);
+
+impl fmt::Display for UnsupportedSnapshotVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unsupported RFVS snapshot version: {}", self.0)
+    }
+}
+
+impl core::error::Error for UnsupportedSnapshotVersion {}
 
 #[cfg(any(not(feature = "no_std"), feature = "hosted"))]
 fn bincode_opts() -> impl bincode::Options {
@@ -248,16 +260,96 @@ pub fn try_decode_state_chunk_v2(file_bytes: &[u8]) -> Result<Option<SaveStateSn
         let payload_end = payload_start + payload_len;
         let payload = &file_bytes[payload_start..payload_end];
 
-        if payload.get(..2) != Some(&2u16.to_le_bytes()) {
-            bail!("unsupported RFVS snapshot version; active motion state is required");
+        if let Some(version_bytes) = payload.get(..2) {
+            let version = u16::from_le_bytes([version_bytes[0], version_bytes[1]]);
+            if version != 2 {
+                return Err(anyhow::Error::new(UnsupportedSnapshotVersion(version)));
+            }
         }
 
         let snap: SaveStateSnapshotV2 = bincode_opts()
             .deserialize(payload)
             .context("deserialize SaveStateSnapshotV2")?;
         if snap.version != 2 {
-            bail!("unsupported SaveStateSnapshotV2 version: {}", snap.version);
+            return Err(anyhow::Error::new(UnsupportedSnapshotVersion(snap.version)));
         }
         Ok(Some(snap))
+    }
+}
+
+#[cfg(all(test, any(not(feature = "no_std"), feature = "hosted")))]
+mod tests {
+    use super::{
+        append_state_chunk_v2, try_decode_state_chunk_v2, SaveStateSnapshotV2,
+        UnsupportedSnapshotVersion, SAVE_STATE_FOOTER_LEN, SAVE_STATE_MAGIC,
+    };
+    use crate::subsystem::resources::thread_manager::ThreadManager;
+    use crate::subsystem::world::GameData;
+
+    fn valid_v2_chunk() -> Vec<u8> {
+        let snapshot = {
+            #[cfg(feature = "hosted")]
+            {
+                SaveStateSnapshotV2::capture_hosted(&GameData::default(), &ThreadManager::new())
+            }
+            #[cfg(not(feature = "hosted"))]
+            {
+                let mut game = GameData::default();
+                SaveStateSnapshotV2::capture(&mut game)
+            }
+        };
+        let mut bytes = Vec::new();
+        append_state_chunk_v2(&mut bytes, &snapshot).unwrap();
+        bytes
+    }
+
+    fn chunk_with_payload(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = payload.to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&SAVE_STATE_MAGIC);
+        bytes
+    }
+
+    fn payload_start(bytes: &[u8]) -> usize {
+        let len_pos = bytes.len() - SAVE_STATE_FOOTER_LEN;
+        let payload_len = u32::from_le_bytes([
+            bytes[len_pos],
+            bytes[len_pos + 1],
+            bytes[len_pos + 2],
+            bytes[len_pos + 3],
+        ]) as usize;
+        bytes.len() - SAVE_STATE_FOOTER_LEN - payload_len
+    }
+
+    #[test]
+    fn unsupported_version_is_typed_and_does_not_mutate_input() {
+        let mut bytes = valid_v2_chunk();
+        let start = payload_start(&bytes);
+        bytes[start..start + 2].copy_from_slice(&1u16.to_le_bytes());
+        let before = bytes.clone();
+
+        let error = try_decode_state_chunk_v2(&bytes).unwrap_err();
+
+        assert_eq!(bytes, before);
+        assert_eq!(
+            error.downcast_ref::<UnsupportedSnapshotVersion>(),
+            Some(&UnsupportedSnapshotVersion(1))
+        );
+    }
+
+    #[test]
+    fn short_or_malformed_v2_payload_is_invalid_data() {
+        for payload in [vec![1u8], vec![2u8, 0]] {
+            let error = try_decode_state_chunk_v2(&chunk_with_payload(&payload)).unwrap_err();
+            assert!(error.downcast_ref::<UnsupportedSnapshotVersion>().is_none());
+        }
+    }
+
+    #[test]
+    fn valid_v2_payload_decodes() {
+        let snapshot = try_decode_state_chunk_v2(&valid_v2_chunk())
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.version, 2);
     }
 }

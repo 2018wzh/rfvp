@@ -66,6 +66,7 @@ pub const fn rfvp_error_to_status(err: RfvpError) -> i32 {
         RfvpError::Io => PspStatus::Io.as_i32(),
         RfvpError::NotFound => PspStatus::NotFound.as_i32(),
         RfvpError::InvalidData => PspStatus::InvalidData.as_i32(),
+        RfvpError::UnsupportedSnapshotVersion => PspStatus::InvalidData.as_i32(),
         RfvpError::InvalidArgument => PspStatus::InvalidArgument.as_i32(),
         RfvpError::Unsupported => PspStatus::Unsupported.as_i32(),
         RfvpError::OutOfMemory => PspStatus::OutOfMemory.as_i32(),

@@ -40,6 +40,7 @@ pub const fn rfvp_error_to_status(err: RfvpError) -> i32 {
         RfvpError::Io => PS3Status::Io.as_i32(),
         RfvpError::NotFound => PS3Status::NotFound.as_i32(),
         RfvpError::InvalidData => PS3Status::InvalidData.as_i32(),
+        RfvpError::UnsupportedSnapshotVersion => PS3Status::InvalidData.as_i32(),
         RfvpError::InvalidArgument => PS3Status::InvalidArgument.as_i32(),
         RfvpError::Unsupported => PS3Status::Unsupported.as_i32(),
         RfvpError::OutOfMemory => PS3Status::OutOfMemory.as_i32(),

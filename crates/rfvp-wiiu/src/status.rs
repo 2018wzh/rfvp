@@ -40,6 +40,7 @@ pub const fn rfvp_error_to_status(err: RfvpError) -> i32 {
         RfvpError::Io => WiiUStatus::Io.as_i32(),
         RfvpError::NotFound => WiiUStatus::NotFound.as_i32(),
         RfvpError::InvalidData => WiiUStatus::InvalidData.as_i32(),
+        RfvpError::UnsupportedSnapshotVersion => WiiUStatus::InvalidData.as_i32(),
         RfvpError::InvalidArgument => WiiUStatus::InvalidArgument.as_i32(),
         RfvpError::Unsupported => WiiUStatus::Unsupported.as_i32(),
         RfvpError::OutOfMemory => WiiUStatus::OutOfMemory.as_i32(),

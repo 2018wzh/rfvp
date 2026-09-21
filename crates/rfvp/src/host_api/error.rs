@@ -13,6 +13,7 @@ pub enum RfvpError {
     CapacityExceeded,
     EndOfFile,
     Backend,
+    UnsupportedSnapshotVersion,
 }
 
 impl RfvpError {
@@ -27,6 +28,7 @@ impl RfvpError {
             Self::CapacityExceeded => 7,
             Self::EndOfFile => 8,
             Self::Backend => 9,
+            Self::UnsupportedSnapshotVersion => 10,
         }
     }
 }
@@ -43,6 +45,7 @@ impl fmt::Display for RfvpError {
             Self::CapacityExceeded => "fixed capacity exceeded",
             Self::EndOfFile => "unexpected end of file",
             Self::Backend => "host backend error",
+            Self::UnsupportedSnapshotVersion => "unsupported snapshot version",
         };
         f.write_str(msg)
     }
