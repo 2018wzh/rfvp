@@ -1,17 +1,27 @@
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+#[cfg(feature = "hosted")]
+use std::io::Read;
 
+#[cfg(not(feature = "hosted"))]
 use crate::font::Font;
 use crate::host_api::{
-    FatalErrorCode, HitProxyTable, PlatformCallbacks, RfvpAudio, RfvpClock, RfvpError, RfvpEvent,
-    RfvpFile, RfvpFileInfo, RfvpFileSystem, RfvpHost, RfvpLogLevel, RfvpRenderer, RfvpResult,
+    HitProxyTable, RfvpAudio, RfvpClock,
+    RfvpError, RfvpEvent, RfvpFile, RfvpFileInfo, RfvpFileSystem, RfvpHost,
+    RfvpLogLevel, RfvpRenderer, RfvpResult,
 };
+#[cfg(feature = "no_std")]
+use crate::host_api::{FatalErrorCode, PlatformCallbacks};
 use crate::rendering::prim_commands::{render_motion_to_host, HostPrimRenderCache};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::parser::{Nls, Parser};
 use crate::subsystem::anzu_scene::AnzuScene;
 use crate::subsystem::resources::text_manager::FontEnumerator;
+#[cfg(feature = "hosted")]
+use crate::subsystem::resources::text_manager::SystemFontBindings;
 use crate::subsystem::resources::vfs::Vfs;
 use crate::subsystem::resources::window::Window;
 use crate::subsystem::world::GameData;
@@ -38,6 +48,10 @@ const MISSING_OLD_SCHOOL_CONFIG_MESSAGE: &str =
 #[cfg(feature = "old_school")]
 const INVALID_OLD_SCHOOL_CONFIG_MESSAGE: &str =
     "Required old-school config file rfvp.toml is invalid: expected exactly one top-level float field, scale.";
+
+#[cfg(test)]
+#[path = "hosted_input_tests.rs"]
+mod hosted_input_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RfvpCoreConfig {
@@ -121,7 +135,9 @@ pub struct RfvpCore {
     pending_events: Vec<RfvpEvent>,
     frame_index: u64,
     last_tick_us: Option<u64>,
-    /// Microseconds not yet handed to the scripts (they count whole milliseconds).
+    #[cfg(feature = "hosted")]
+    timeline_reset: bool,
+    /// Microseconds not yet handed to the scripts.
     carry_us: u64,
     quit_requested: bool,
     run_state: RfvpCoreRunState,
@@ -129,20 +145,20 @@ pub struct RfvpCore {
     parser: Option<Parser>,
     game_data: GameData,
     vm_runner: Option<VmRunner>,
+    #[cfg(feature = "hosted")]
+    pending_system_font_bindings: Option<SystemFontBindings>,
     render_cache: HostPrimRenderCache,
     hit_proxies: HitProxyTable,
     last_error: Option<RfvpError>,
     last_error_detail: Option<String>,
-    /// Hash of the global save as last written, so an unchanged one is not written again.
+    /// Hash of the last saved global data.
     last_global_save_hash: Option<u64>,
-    /// Time since the global save was last looked at.
     us_since_global_save: u64,
+    // Diagnostic context only; never serialized into game state.
+    last_operation: &'static str,
 }
 
-/// How often the global save (read-text marks, flags) is written during play. Consoles are often
-/// left through the home button or by power, so it cannot wait for a clean exit.
 const GLOBAL_SAVE_INTERVAL_US: u64 = 120_000_000;
-/// The PlayStation's cache of the HCB, for the strings of the compiled script (crate::aot).
 #[cfg(feature = "psx_aot")]
 const AOT_STRING_CACHE: usize = 4 * 1024;
 
@@ -162,6 +178,8 @@ impl RfvpCore {
             pending_events: Vec::new(),
             frame_index: 0,
             last_tick_us: None,
+            #[cfg(feature = "hosted")]
+            timeline_reset: false,
             carry_us: 0,
             quit_requested: false,
             run_state: RfvpCoreRunState::NotBooted,
@@ -169,13 +187,40 @@ impl RfvpCore {
             parser: None,
             game_data: GameData::default(),
             vm_runner: None,
+            #[cfg(feature = "hosted")]
+            pending_system_font_bindings: None,
             render_cache: HostPrimRenderCache::new(),
             hit_proxies: HitProxyTable::default(),
             last_error: None,
             last_error_detail: None,
             last_global_save_hash: None,
             us_since_global_save: 0,
+            last_operation: "initialization",
         }
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn take_timeline_reset(&mut self) -> bool {
+        core::mem::take(&mut self.timeline_reset)
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn is_waiting_for_movie(&self) -> bool {
+        self.game_data.video_manager.is_modal_active()
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn shutdown(&mut self) -> RfvpResult<()> {
+        self.game_data.video_manager.stop(&mut self.game_data.motion_manager);
+        self.save_global_data()
+    }
+
+    #[cfg(feature = "hosted")]
+    fn sync_hosted_audio_state<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
+        self.last_operation = "audio playback state";
+        let commands = self.game_data.audio_manager.backend().host_commands()
+            .ok_or(RfvpError::Unsupported)?;
+        commands.sync_playback(|id| host.audio().is_playing(id))
     }
 
     /// Rasterize text at `scale` times the game's virtual size: a host whose screen shows the
@@ -232,6 +277,22 @@ impl RfvpCore {
         self.config
     }
 
+    pub fn last_operation(&self) -> &'static str {
+        self.last_operation
+    }
+
+    /// Persist the upstream global/system save at the host's explicit close boundary.
+    #[cfg(feature = "hosted")]
+    pub fn save_global_data(&self) -> RfvpResult<()> {
+        if self.run_state != RfvpCoreRunState::Booted {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let bytes = crate::subsystem::global_savedata::encode_global_savedata_v1(&self.game_data)
+            .map_err(|_| RfvpError::InvalidData)?;
+        let storage = self.game_data.save_manager.storage().ok_or(RfvpError::Unsupported)?;
+        storage.write(crate::subsystem::global_savedata::GLOBAL_SAVE_STORAGE_PATH, &bytes)
+    }
+
     pub fn frame_index(&self) -> u64 {
         self.frame_index
     }
@@ -239,6 +300,16 @@ impl RfvpCore {
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
     }
+
+    /// A hosted session is terminal when either the host requested shutdown or
+    /// the script's main execution path reached its terminal state.
+    #[cfg(feature = "hosted")]
+    pub fn hosted_terminal(&self) -> bool {
+        self.quit_requested
+            || self.game_data.get_main_thread_exited()
+            || self.game_data.get_game_should_exit()
+    }
+
 
     pub fn run_state(&self) -> RfvpCoreRunState {
         self.run_state
@@ -256,6 +327,22 @@ impl RfvpCore {
         self.last_error_detail.as_deref()
     }
 
+
+    /// Binds host-selected faces while preserving the native optional-slot fallback.
+    #[cfg(feature = "hosted")]
+    pub fn set_hosted_system_font_bindings(
+        &mut self,
+        bindings: SystemFontBindings,
+    ) -> RfvpResult<()> {
+        if self.run_state != RfvpCoreRunState::NotBooted {
+            return Err(RfvpError::InvalidData);
+        }
+        self.pending_system_font_bindings = Some(bindings);
+        Ok(())
+    }
+
+
+
     pub fn push_event(&mut self, event: RfvpEvent) -> RfvpResult<()> {
         if self.pending_events.len() >= self.config.max_pending_events {
             return Err(RfvpError::CapacityExceeded);
@@ -264,8 +351,59 @@ impl RfvpCore {
         Ok(())
     }
 
+    /// Reads one logical RFVP resource from the session-owned pack index.
+    ///
+    /// Pack bytes are still obtained through the embedding's `RfvpHost` file
+    /// port that was used at boot; this method only resolves the bounded
+    /// archive entry metadata retained by the core. It never opens an ambient
+    /// filesystem path.
+    #[cfg(feature = "hosted")]
+    pub fn read_hosted_resource(
+        &self,
+        resource_uri: &str,
+        max_bytes: usize,
+    ) -> RfvpResult<Vec<u8>> {
+        if resource_uri.is_empty() || resource_uri.contains('\0') || max_bytes == 0 {
+            return Err(RfvpError::InvalidArgument);
+        }
+        let (mut stream, known_len) = self
+            .game_data
+            .vfs
+            .open_stream_with_len(resource_uri)
+            .map_err(|_| RfvpError::NotFound)?;
+        if known_len.is_some_and(|len| len > max_bytes as u64) {
+            return Err(RfvpError::CapacityExceeded);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or(RfvpError::CapacityExceeded)? as u64;
+        let capacity = known_len
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or_default();
+        let mut bytes = Vec::with_capacity(capacity);
+        stream
+            .by_ref()
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RfvpError::Io)?;
+        if bytes.len() > max_bytes {
+            return Err(RfvpError::CapacityExceeded);
+        }
+        Ok(bytes)
+    }
+
     pub fn clear_events(&mut self) {
         self.pending_events.clear();
+    }
+
+    /// Drops only the transient renderer upload generations retained by the
+    /// core. A hosted embedding owns the actual backend texture lifetime, so
+    /// boot and restore boundaries must force the next frame to republish each
+    /// live graph instead of trusting a cache from a previous host epoch.
+    #[cfg(feature = "hosted")]
+    pub fn invalidate_host_render_cache(&mut self) {
+        self.render_cache = HostPrimRenderCache::new();
     }
 
     pub fn boot<H: RfvpHost>(&mut self, host: &mut H, boot: RfvpBootConfig<'_>) -> RfvpResult<()>
@@ -385,6 +523,7 @@ impl RfvpCore {
         })?;
         #[cfg(feature = "psx")]
         host.log(RfvpLogLevel::Debug, "boot: before font");
+        #[cfg(not(feature = "hosted"))]
         let default_font = load_required_default_font(host).map_err(|(err, detail)| {
             self.last_error_detail = Some(detail);
             err
@@ -399,6 +538,7 @@ impl RfvpCore {
         }
         #[cfg(feature = "psx")]
         host.log(RfvpLogLevel::Debug, "boot: before globals");
+        #[cfg(not(feature = "hosted"))]
         GLOBAL.lock().map_err(|_| RfvpError::Backend)?.init_with(
             parser.get_non_volatile_global_count(),
             parser.get_volatile_global_count(),
@@ -418,12 +558,29 @@ impl RfvpCore {
         let game_data = &mut self.game_data;
         #[cfg(not(feature = "psx"))]
         let mut game_data = GameData::default();
+        #[cfg(feature = "hosted")]
+        game_data.init_hosted_globals(
+            parser.get_non_volatile_global_count(),
+            parser.get_volatile_global_count(),
+        );
         game_data
             .save_manager
             .set_storage(game_save_storage(host, &hcb.path, &parser.get_title()));
         #[cfg(feature = "old_school")]
         game_data.set_old_school_scale(old_school_scale);
-        game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        #[cfg(not(feature = "hosted"))]
+        {
+            game_data.fontface_manager = FontEnumerator::from_default_font(default_font);
+        }
+        #[cfg(feature = "hosted")]
+        {
+            let bindings = self.pending_system_font_bindings.take().ok_or(RfvpError::InvalidData)?;
+            game_data.fontface_manager = FontEnumerator::from_system_font_bindings(bindings)
+                .map_err(|error| {
+                    self.last_error_detail = Some(error.to_string());
+                    RfvpError::InvalidData
+                })?;
+        }
         game_data.vfs = vfs;
         game_data.nls = boot.nls;
         #[cfg(feature = "psx")]
@@ -436,11 +593,17 @@ impl RfvpCore {
         match global {
             Ok(true) => host.log(RfvpLogLevel::Info, "restored the global save"),
             Ok(false) => {}
-            Err(err) => host.log(
-                RfvpLogLevel::Warn,
-                &format!("could not read the global save: {err:#}"),
-            ),
+            Err(err) => {
+                #[cfg(feature = "hosted")]
+                {
+                    self.last_error_detail = Some(err.to_string());
+                    return Err(RfvpError::InvalidData);
+                }
+                #[cfg(not(feature = "hosted"))]
+                host.log(RfvpLogLevel::Warn, &format!("could not read the global save: {err:#}"));
+            }
         }
+
 
         let mut vm_runner =
             VmRunner::new(crate::subsystem::resources::thread_manager::ThreadManager::new());
@@ -468,10 +631,41 @@ impl RfvpCore {
         }
         self.vm_runner = Some(vm_runner);
         self.parser = Some(parser);
+        // Bind the first hosted frame to elapsed host time since boot. Leaving
+        // this unset makes the first tick consume a zero delta and permanently
+        // shifts script timers and motion state by one presentation.
+        self.last_tick_us = Some(host.clock().ticks_us());
         Ok(())
     }
 
     pub fn tick<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<RfvpTickResult> {
+        #[cfg(feature = "hosted-gpu")]
+        {
+            self.tick_with_renderer(host, None)
+        }
+        #[cfg(not(feature = "hosted-gpu"))]
+        {
+            self.tick_with_renderer(host)
+        }
+    }
+
+    /// Uses the same native renderer at the synchronous SaveCreate boundary.
+    #[cfg(feature = "hosted-gpu")]
+    pub fn tick_with_gpu<H: RfvpHost>(
+        &mut self,
+        host: &mut H,
+        renderer: &mut crate::rfvp_render::hosted::HostedGpuRenderer,
+    ) -> RfvpResult<RfvpTickResult> {
+        self.tick_with_renderer(host, Some(renderer))
+    }
+
+    fn tick_with_renderer<H: RfvpHost>(
+        &mut self,
+        host: &mut H,
+        #[cfg(feature = "hosted-gpu")]
+        gpu: Option<&mut crate::rfvp_render::hosted::HostedGpuRenderer>,
+    ) -> RfvpResult<RfvpTickResult> {
+        self.last_operation = "tick input";
         let now = host.clock().ticks_us();
         let elapsed_us = match self.last_tick_us.replace(now) {
             Some(prev) => now.saturating_sub(prev),
@@ -492,15 +686,31 @@ impl RfvpCore {
             self.save_global_if_changed(host);
         }
 
+        #[cfg(feature = "no_std")]
         crate::platform_time::set_host_time_us(now);
+        #[cfg(feature = "hosted")]
+        self.game_data.time_mut_ref()
+            .set_external_delta(crate::platform_time::Duration::from_micros(elapsed_us));
+        self.game_data.inputs_manager.begin_frame();
+        self.last_operation = "audio tick";
         host.audio().tick(elapsed_us)?;
         {
             let game = &mut self.game_data;
             if let Err(err) = game.video_manager.tick(&mut game.motion_manager) {
-                host.log(RfvpLogLevel::Warn, &format!("movie stopped: {err:?}"));
-                game.video_manager.stop(&mut game.motion_manager);
+                #[cfg(feature = "hosted")]
+                {
+                    self.last_error_detail = Some(err.to_string());
+                    return Err(RfvpError::Unsupported);
+                }
+                #[cfg(not(feature = "hosted"))]
+                {
+                    host.log(RfvpLogLevel::Warn, &format!("movie stopped: {err:?}"));
+                    game.video_manager.stop(&mut game.motion_manager);
+                }
             }
         }
+        #[cfg(feature = "hosted")]
+        self.sync_hosted_audio_state(host)?;
         let (mut vm_us, mut scene_us, mut render_us) = (0, 0, 0);
         if let (Some(parser), Some(vm_runner)) = (self.parser.as_mut(), self.vm_runner.as_mut()) {
             let pending_us = self.carry_us + elapsed_us;
@@ -513,12 +723,21 @@ impl RfvpCore {
             let t0 = host.clock().ticks_us();
             let vm_started = crate::perf::start();
             crate::perf::mark(100);
-            if let Err(err) = vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
-                let message = err.to_string();
-                host.log(RfvpLogLevel::Error, &message);
-                self.last_error = Some(RfvpError::Unsupported);
-                self.last_error_detail = Some(message);
-                return Err(RfvpError::Unsupported);
+            match vm_runner.tick(&mut self.game_data, parser, frame_time_ms) {
+                #[cfg(feature = "hosted")]
+                Ok(report) if report.timeline_reset => {
+                    self.timeline_reset = true;
+                    self.carry_us = 0;
+                    self.render_cache = HostPrimRenderCache::new();
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    let message = err.to_string();
+                    host.log(RfvpLogLevel::Error, &message);
+                    self.last_error = Some(RfvpError::Unsupported);
+                    self.last_error_detail = Some(message);
+                    return Err(RfvpError::Unsupported);
+                }
             }
 
             // The original engine advances scripts before text and motion updates.
@@ -535,10 +754,13 @@ impl RfvpCore {
             crate::perf::stop(18, t);
             let t = crate::perf::start();
             // A SaveWrite whose payload was prepared earlier needs no capture of this frame.
-            self.commit_prepared_save(host);
+            self.commit_prepared_save(host)?;
             // The thumbnail is the frame last shown, as in the original engine (SaveCreate(3)
             // reads its render target back when called), not one with the script's new state.
-            self.capture_pending_save(host);
+            #[cfg(feature = "hosted-gpu")]
+            self.capture_pending_save(host, gpu)?;
+            #[cfg(not(feature = "hosted-gpu"))]
+            self.capture_pending_save(host)?;
             crate::perf::stop(19, t);
             crate::perf::mark(400);
             self.render_game_frame(host)?;
@@ -600,7 +822,7 @@ impl RfvpCore {
     }
 
     /// Commit a `SaveWrite(slot)` whose payload `SaveCreate(3, ..)` prepared earlier.
-    fn commit_prepared_save<H: RfvpHost>(&mut self, host: &mut H) {
+    fn commit_prepared_save<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
         let nls = self.game_data.get_nls();
         match self.game_data.save_manager.try_commit_local_savedata(nls) {
             Ok(true) => {
@@ -610,18 +832,36 @@ impl RfvpCore {
             Ok(false) => {}
             Err(err) => {
                 host.log(RfvpLogLevel::Error, &format!("could not write the save: {err:#}"));
+                #[cfg(feature = "hosted")]
+                return Err(RfvpError::Io);
+                #[cfg(not(feature = "hosted"))]
                 self.game_data.save_manager.consume_save_write_result();
             }
         }
+        Ok(())
     }
 
     /// If a save asked for a capture, take the thumbnail of the frame last shown and the engine
     /// state now, and write the slot (or prepare the payload for a later `SaveWrite`).
-    fn capture_pending_save<H: RfvpHost>(&mut self, host: &mut H) {
+    fn capture_pending_save<H: RfvpHost>(
+        &mut self,
+        host: &mut H,
+        #[cfg(feature = "hosted-gpu")]
+        gpu: Option<&mut crate::rfvp_render::hosted::HostedGpuRenderer>,
+    ) -> RfvpResult<()> {
         let Some((slot, thumb_w, thumb_h)) = self.game_data.save_manager.pending_save_capture()
         else {
-            return;
+            return Ok(());
         };
+        #[cfg(feature = "hosted-gpu")]
+        let thumb = gpu.ok_or(RfvpError::Unsupported)?
+            .capture_current_thumbnail(thumb_w, thumb_h)
+            .map_err(|detail| {
+                self.last_error_detail = Some(detail.to_owned());
+                RfvpError::Backend
+            })?;
+        #[cfg(not(feature = "hosted-gpu"))]
+        let thumb = {
         let expected = thumb_w as usize * thumb_h as usize * 4;
         let thumb = match host.renderer().capture_thumbnail(thumb_w, thumb_h) {
             Some(thumb) if thumb.len() == expected => thumb,
@@ -631,6 +871,8 @@ impl RfvpCore {
             _ => Vec::new(),
             #[cfg(not(feature = "psx"))]
             _ => alloc::vec![0u8; expected],
+        };
+            thumb
         };
         self.game_data
             .save_manager
@@ -686,8 +928,12 @@ impl RfvpCore {
         };
         if let Err(err) = result {
             host.log(RfvpLogLevel::Error, &format!("could not save: {err:#}"));
+            #[cfg(feature = "hosted")]
+            return Err(RfvpError::Io);
+            #[cfg(not(feature = "hosted"))]
             self.game_data.save_manager.consume_save_write_result();
         }
+        Ok(())
     }
 
     pub fn render_empty_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
@@ -696,6 +942,36 @@ impl RfvpCore {
 
     pub fn render_status_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
         self.render_game_frame(host)
+    }
+
+
+
+    #[cfg(feature = "hosted-gpu")]
+    pub fn render_hosted_gpu(
+        &mut self,
+        renderer: &mut crate::rfvp_render::hosted::HostedGpuRenderer,
+    ) -> Result<Vec<u8>, &'static str> {
+        let motion = &mut self.game_data.motion_manager;
+        motion.restore_evicted_cpu_pixels(&self.game_data.vfs, |id, generation| {
+            renderer.is_graph_uploaded(id, generation)
+        });
+        let frame = renderer.render(motion)?;
+        motion.evict_uploaded_cpu_pixels(|id, generation| renderer.is_graph_uploaded(id, generation));
+        Ok(frame)
+    }
+
+    #[cfg(feature = "hosted-gpu")]
+    pub fn submit_hosted_gpu(
+        &mut self,
+        renderer: &mut crate::rfvp_render::hosted::HostedGpuRenderer,
+    ) -> Result<(), &'static str> {
+        let motion = &mut self.game_data.motion_manager;
+        motion.restore_evicted_cpu_pixels(&self.game_data.vfs, |id, generation| {
+            renderer.is_graph_uploaded(id, generation)
+        });
+        renderer.submit(motion)?;
+        motion.evict_uploaded_cpu_pixels(|id, generation| renderer.is_graph_uploaded(id, generation));
+        Ok(())
     }
 
     fn render_game_frame<H: RfvpHost>(&mut self, host: &mut H) -> RfvpResult<()> {
@@ -738,8 +1014,11 @@ impl RfvpCore {
             (self.config.virtual_width, self.config.virtual_height),
         )?;
         self.hit_proxies = frame.hit_proxies;
-        // Pictures the host now holds need no second copy here: a console has little memory.
+        // Only a pixel-owning backend may authorize eviction. The hosted GPU
+        // metadata observer does not upload; its native GPU does this after rebuild.
+        #[cfg(not(feature = "hosted-gpu"))]
         let cache = &self.render_cache;
+        #[cfg(not(feature = "hosted-gpu"))]
         self.game_data
             .motion_manager
             .evict_uploaded_cpu_pixels(|id, generation| cache.is_graph_uploaded(id, generation));
@@ -808,10 +1087,17 @@ impl RfvpCore {
                 RfvpEvent::Wheel { delta_y, .. } => {
                     self.game_data.inputs_manager.notify_mouse_wheel(delta_y);
                 }
+                RfvpEvent::FocusLost => {
+                    self.game_data.inputs_manager.set_flash();
+                }
+                RfvpEvent::FocusGained => {
+                    self.game_data.inputs_manager.set_flash();
+                    self.game_data.inputs_manager.suppress_next_mouse_click();
+                    self.game_data.inputs_manager.set_mouse_in(true);
+                }
                 _ => {}
             }
         }
-        self.game_data.inputs_manager.begin_frame();
     }
 
     /// Hand the frame's audio commands to the host. A sound the host cannot play is logged and
@@ -896,6 +1182,7 @@ fn audio_command_index(command: &crate::rfvp_audio::AudioCommand) -> u32 {
     }
 }
 
+#[cfg(feature = "no_std")]
 fn load_required_default_font<H: RfvpHost>(host: &mut H) -> Result<Font, (RfvpError, String)> {
     let callbacks = host.platform_callbacks();
     let mut bytes = Vec::new();
@@ -977,6 +1264,7 @@ fn load_required_default_font<H: RfvpHost>(host: &mut H) -> Result<Font, (RfvpEr
     }
 }
 
+#[cfg(feature = "no_std")]
 fn notify_fatal(callbacks: PlatformCallbacks, code: FatalErrorCode, message: &str) {
     if let Some(callback) = callbacks.fatal_error {
         callback(callbacks.user_data, code, message.as_ptr(), message.len());

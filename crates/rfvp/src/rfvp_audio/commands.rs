@@ -80,6 +80,8 @@ struct State {
     commands: Vec<AudioCommand>,
     /// Streams started and not stopped since. The host does not report when a sound ends.
     playing: StableHashSet<u32>,
+    #[cfg(feature = "hosted")]
+    loaded: StableHashSet<u32>,
 }
 
 pub struct CommandBackend {
@@ -103,9 +105,31 @@ impl CommandBackend {
         let mut state = self.state.lock().ok().expect("audio command lock");
         f(&mut state)
     }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn sync_playback(
+        &self,
+        mut playing: impl FnMut(AudioStreamId) -> crate::host_api::RfvpResult<bool>,
+    ) -> crate::host_api::RfvpResult<()> {
+        self.with(|state| {
+            for &id in &state.loaded {
+                if playing(AudioStreamId(id))? {
+                    state.playing.insert(id);
+                } else {
+                    state.playing.remove(&id);
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 impl AudioBackend for CommandBackend {
+    #[cfg(feature = "hosted")]
+    fn host_commands(&self) -> Option<&Self> {
+        Some(self)
+    }
+
     fn load(&self, id: AudioStreamId, source: &SoundSource, vfs: &Vfs) -> Result<()> {
         let kind = source.encoded_kind();
         if let SoundSource::Named(name) = source {
@@ -113,6 +137,8 @@ impl AudioBackend for CommandBackend {
             if len.is_some_and(|len| len >= STREAM_FROM_BYTES) {
                 let stream = AudioByteStream::new(stream);
                 self.with(|state| {
+                    #[cfg(feature = "hosted")]
+                    state.loaded.insert(id.0);
                     state
                         .commands
                         .push(AudioCommand::LoadStream { id, kind, stream })
@@ -122,6 +148,8 @@ impl AudioBackend for CommandBackend {
         }
         let bytes = source.read(vfs)?;
         self.with(|state| {
+            #[cfg(feature = "hosted")]
+            state.loaded.insert(id.0);
             state
                 .commands
                 .push(AudioCommand::LoadEncoded { id, kind, bytes })
@@ -130,7 +158,14 @@ impl AudioBackend for CommandBackend {
     }
 
     fn unload(&self, id: AudioStreamId) {
+        #[cfg(not(feature = "hosted"))]
         self.stop(id, Tween::default());
+        #[cfg(feature = "hosted")]
+        self.with(|state| {
+            state.loaded.remove(&id.0);
+            state.playing.remove(&id.0);
+            state.commands.push(AudioCommand::DestroyStream { id });
+        });
     }
 
     fn play(&self, id: AudioStreamId, params: AudioParams, fade_in: Tween, _vfs: &Vfs) -> Result<()> {

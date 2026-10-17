@@ -22,6 +22,8 @@ use crate::subsystem::components::syscalls::utils::{
     nullsub_2, Debmess, DissolveWait, ExitDialog, TitleMenu, UnimplementedNamed,
 };
 
+#[cfg(feature = "hosted")]
+use crate::script::global::Global;
 use crate::script::{Variant, VmSyscall};
 use crate::subsystem::components::syscalls::color::ColorSet;
 use crate::subsystem::components::syscalls::flag::{FlagGet, FlagSet};
@@ -134,6 +136,8 @@ pub trait World {
 }
 
 pub struct GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) globals: Global,
     pub(crate) vfs: Vfs,
     pub(crate) thread_wrapper: ThreadWrapper,
     pub(crate) history_manager: HistoryManager,
@@ -149,7 +153,7 @@ pub struct GameData {
     time: Time,
     scene_controller: SceneController,
     window: Window,
-    audio_manager: Arc<AudioManager>,
+    pub(crate) audio_manager: Arc<AudioManager>,
     pub(crate) se_player: SePlayer,
     pub(crate) bgm_player: BgmPlayer,
     root_prim: Option<i16>,
@@ -177,6 +181,7 @@ pub struct GameData {
     pub(crate) debug_vm: crate::debug_ui::vm_snapshot::VmSnapshot,
 }
 
+
 impl GameData {
     /// Initialize a `GameData` at `dst` with the same values as `GameData::default()`,
     /// but without creating a large temporary on the stack.
@@ -191,6 +196,8 @@ impl GameData {
         uefi_game_data_stage!("[UEFI] GameData init after AudioManager");
 
         uefi_game_data_stage!("[UEFI] GameData init before vfs");
+        #[cfg(feature = "hosted")]
+        ptr::addr_of_mut!((*dst).globals).write(Global::new());
         ptr::addr_of_mut!((*dst).vfs).write(Vfs::default());
         uefi_game_data_stage!("[UEFI] GameData init after vfs");
         uefi_game_data_stage!("[UEFI] GameData init before thread_wrapper");
@@ -257,6 +264,8 @@ impl Default for GameData {
         let audio_manager = Arc::new(AudioManager::new());
 
         Self {
+            #[cfg(feature = "hosted")]
+            globals: Global::new(),
             vfs: Vfs::default(),
             thread_wrapper: ThreadWrapper::default(),
             history_manager: HistoryManager::default(),
@@ -300,6 +309,17 @@ impl Default for GameData {
 }
 
 impl GameData {
+    #[cfg(feature = "hosted")]
+    pub(crate) fn init_hosted_globals(&mut self, non_volatile: u16, volatile: u16) {
+        self.globals.init_with(non_volatile, volatile);
+    }
+
+    #[cfg(feature = "hosted")]
+    pub(crate) fn hosted_global_int(&self, key: u16) -> i32 {
+        self.globals.get_int_var(key)
+    }
+
+
     /// retrieves the timers resource from the resources.
     pub fn time_ref(&self) -> &Time {
         &self.time
@@ -596,6 +616,11 @@ impl VmSyscall for GameData {
             |syscall| syscall.call(self, &args),
         );
         result
+    }
+
+    #[cfg(feature = "hosted")]
+    fn with_globals<R>(&mut self, callback: impl FnOnce(&mut Global) -> R) -> R {
+        callback(&mut self.globals)
     }
 }
 

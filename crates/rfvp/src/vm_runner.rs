@@ -35,6 +35,7 @@ pub struct VmRunner {
     tm: ThreadManager,
 }
 
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VmTickReport {
     /// Reserved for compatibility with the existing host/worker interface.
@@ -42,11 +43,15 @@ pub struct VmTickReport {
     pub forced_yield: bool,
     /// Reserved for compatibility with the existing host/worker interface.
     pub forced_yield_contexts: u32,
+    #[cfg(feature = "hosted")]
+    pub timeline_reset: bool,
 }
 
 impl VmRunner {
     pub fn new(tm: ThreadManager) -> Self {
-        Self { tm }
+        Self {
+            tm,
+        }
     }
 
     pub fn thread_manager(&self) -> &ThreadManager {
@@ -56,6 +61,7 @@ impl VmRunner {
     pub fn thread_manager_mut(&mut self) -> &mut ThreadManager {
         &mut self.tm
     }
+
 
     pub fn start_main(&mut self, entry_point: u32) {
         self.tm.start_main(entry_point);
@@ -85,11 +91,11 @@ impl VmRunner {
             return Ok(VmTickReport::default());
         }
 
+
         // If a save capture is pending, snapshot the VM state now (on the VM thread) so the
         // render thread can serialize it without accessing the VM internals.
-        if game.save_manager.wants_vm_snapshot_capture()
-            && !game.save_manager.has_pending_vm_snapshot()
-        {
+        let capture_pending = game.save_manager.wants_vm_snapshot_capture();
+        if capture_pending && !game.save_manager.has_pending_vm_snapshot() {
             uefi_vm_stage!("[UEFI] VmRunner::tick before capture_snapshot_v1 pre");
             let started = crate::perf::start();
             let snap = self.tm.capture_snapshot_v1();
@@ -97,10 +103,16 @@ impl VmRunner {
             crate::perf::stop(21, started);
             uefi_vm_stage!("[UEFI] VmRunner::tick after capture_snapshot_v1 pre");
         }
+        #[cfg(feature = "hosted")]
+        if capture_pending {
+            return Ok(VmTickReport::default());
+        }
 
         // Process deferred load requests at a safe point (between VM ticks).
         uefi_vm_stage!("[UEFI] VmRunner::tick before take_load_request");
         if let Some(slot) = game.save_manager.take_load_request() {
+            #[cfg(feature = "hosted")]
+            let mut restored = false;
             match read_slot_for_load(game, slot) {
                 Ok(bytes) => {
                     let nls = game.get_nls();
@@ -117,8 +129,12 @@ impl VmRunner {
 
                     match try_decode_state_chunk_v1(&bytes) {
                         Ok(Some(s)) => {
-                            if let Err(e) = s.apply(game, &mut self.tm) {
-                                log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e);
+                            match s.apply(game, &mut self.tm) {
+                                Ok(()) => {
+                                    #[cfg(feature = "hosted")]
+                                    { restored = true; }
+                                }
+                                Err(e) => log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e),
                             }
                         }
                         Ok(None) => {
@@ -148,7 +164,10 @@ impl VmRunner {
             if debug_ui::enabled() {
                 game.debug_vm_mut().update_from_thread_manager(&self.tm);
             }
-            return Ok(VmTickReport::default());
+            let mut report = VmTickReport::default();
+            #[cfg(feature = "hosted")]
+            { report.timeline_reset = restored; }
+            return Ok(report);
         }
         uefi_vm_stage!("[UEFI] VmRunner::tick after take_load_request");
 
@@ -227,9 +246,11 @@ impl VmRunner {
             match req {
                 ThreadRequest::TextResume(id) => {
                     let mut st = self.tm.get_context_status(id);
-                    st.remove(ThreadState::CONTEXT_STATUS_TEXT);
-                    st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
-                    self.tm.set_context_status(id, st);
+                    if st.contains(ThreadState::CONTEXT_STATUS_TEXT) {
+                        st.remove(ThreadState::CONTEXT_STATUS_TEXT);
+                        st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
+                        self.tm.set_context_status(id, st);
+                    }
                 }
                 other => keep.push_back(other),
             }
@@ -349,16 +370,30 @@ impl VmRunner {
         );
         while !self.tm.get_context_should_break(tid) {
             uefi_vm_stage!("[UEFI] run_one_context before dispatch tid={}", tid);
+            #[cfg(feature = "hosted")]
+            let instruction_pc = self.tm.contexts[tid as usize].get_pc();
             let result = self.tm.context_dispatch_opcode(tid, game, parser);
             uefi_vm_stage!("[UEFI] run_one_context after dispatch tid={}", tid);
 
             if self.tm.get_contexct_should_exit(tid) {
+                game.thread_wrapper.cancel_text_requests(tid);
+                game.motion_manager.text_manager.cancel_sync_print_waits(tid);
                 self.tm.thread_exit(Some(tid));
                 break;
             }
 
             if let Err(e) = result {
-                // Preserve the previous "fail fast" behavior for now.
+                #[cfg(feature = "hosted")]
+                tracing::debug!(
+                    target: "rfvp::vm",
+                    event = "rfvp.vm.instruction.failed",
+                    context_id = tid,
+                    program_counter = instruction_pc,
+                    opcode = parser.read_u8(instruction_pc).ok(),
+                    syscall_id = (parser.read_u8(instruction_pc).ok() == Some(3))
+                        .then(|| parser.read_u16(instruction_pc + 1).ok()).flatten(),
+                );
+                #[cfg(not(feature = "hosted"))]
                 log::error!("Error while executing the script: {:#?}", e);
                 anyhow::bail!(e);
             }
@@ -368,7 +403,11 @@ impl VmRunner {
             // Drain all pending requests emitted by syscalls.
             while let Some(event) = game.thread_wrapper.pop() {
                 match event {
-                    ThreadRequest::Start(id, addr) => self.tm.thread_start(id, addr),
+                    ThreadRequest::Start(id, addr) => {
+                        game.thread_wrapper.cancel_text_requests(id);
+                        game.motion_manager.text_manager.cancel_sync_print_waits(id);
+                        self.tm.thread_start(id, addr);
+                    }
                     ThreadRequest::Wait(time) => {
                         self.tm.thread_wait(time);
                         must_yield = true;
@@ -398,11 +437,16 @@ impl VmRunner {
                     }
                     ThreadRequest::TextResume(id) => {
                         let mut st = self.tm.get_context_status(id);
-                        st.remove(ThreadState::CONTEXT_STATUS_TEXT);
-                        st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
-                        self.tm.set_context_status(id, st);
+                        if st.contains(ThreadState::CONTEXT_STATUS_TEXT) {
+                            st.remove(ThreadState::CONTEXT_STATUS_TEXT);
+                            st.insert(ThreadState::CONTEXT_STATUS_RUNNING);
+                            self.tm.set_context_status(id, st);
+                        }
                     }
                     ThreadRequest::Exit(id) => {
+                        let target = id.unwrap_or(tid);
+                        game.thread_wrapper.cancel_text_requests(target);
+                        game.motion_manager.text_manager.cancel_sync_print_waits(target);
                         self.tm.thread_exit(id);
                         must_yield = true;
                     }
@@ -424,4 +468,8 @@ impl VmRunner {
 
         Ok(())
     }
+
 }
+
+#[cfg(test)]
+mod tests;

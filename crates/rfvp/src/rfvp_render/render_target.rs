@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::time::{Duration, Instant};
 use glam::{mat4, vec4, Mat4, Vec4};
 use wgpu::util::DeviceExt;
 
@@ -11,51 +13,92 @@ pub struct RenderTargetReadback {
     pub height: u32,
     pub bytes_per_row: u32,
     pub padded_bytes_per_row: u32,
+    completion: Arc<AtomicU64>,
+    map_generation: u64,
+    map_deadline: Option<Instant>,
 }
 
 impl RenderTargetReadback {
-    // get pixels as RGBA8 slice
-    pub fn map_to_rgba8(&self, device: &wgpu::Device) -> Vec<u8> {
+    pub fn map_to_rgba8(&mut self, device: &wgpu::Device) -> Vec<u8> {
+        self.try_map_to_rgba8(device)
+            .expect("render target readback failed")
+    }
+
+    pub fn try_map_to_rgba8(&mut self, device: &wgpu::Device) -> Result<Vec<u8>, &'static str> {
+        self.begin_mapping()?;
+        let mut pixels = Vec::new();
+        loop {
+            if self.poll_rgba8_into(device, &mut pixels)? {
+                return Ok(pixels);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub(super) fn begin_mapping(&mut self) -> Result<(), &'static str> {
+        if self.map_deadline.is_some() {
+            return Err("RFVP_GPU_READBACK_PENDING");
+        }
+        let generation = self.map_generation.checked_add(1)
+            .filter(|generation| *generation <= u64::MAX >> 2)
+            .ok_or("RFVP_GPU_READBACK_EPOCH_EXHAUSTED")?;
+        self.map_generation = generation;
+        let pending = (generation << 2) | 1;
+        self.completion.store(pending, Ordering::Release);
+        self.map_deadline = Some(Instant::now() + Duration::from_secs(5));
+        let completion = Arc::clone(&self.completion);
+        self.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let done = (generation << 2) | if result.is_ok() { 2 } else { 3 };
+            // Cancellation/reuse can precede an old driver's callback.
+            let _ = completion.compare_exchange(pending, done, Ordering::AcqRel, Ordering::Acquire);
+        });
+        Ok(())
+    }
+
+    pub(super) fn cancel_mapping(&mut self) {
+        let status = self.completion.swap(0, Ordering::AcqRel) & 3;
+        if self.map_deadline.take().is_some() && status != 3 {
+            self.buffer.unmap();
+        }
+    }
+
+    pub(super) fn poll_rgba8_into(&mut self, device: &wgpu::Device, out: &mut Vec<u8>) -> Result<bool, &'static str> {
+        let deadline = self.map_deadline.ok_or("RFVP_GPU_READBACK_NOT_PENDING")?;
+        device.poll(wgpu::Maintain::Poll);
+        match self.completion.load(Ordering::Acquire) & 3 {
+            1 => {
+                if Instant::now() >= deadline {
+                    self.cancel_mapping();
+                    return Err("RFVP_GPU_READBACK_TIMEOUT");
+                }
+                return Ok(false);
+            }
+            2 => {}
+            _ => {
+                self.cancel_mapping();
+                return Err("RFVP_GPU_READBACK_FAILED");
+            }
+        }
         let height = self.height as usize;
         let dst_bpr = self.bytes_per_row as usize;
         let src_bpr = self.padded_bytes_per_row as usize;
-
-        if height == 0 || dst_bpr == 0 {
-            return Vec::new();
-        }
-
         let slice = self.buffer.slice(..);
-
-        // wgpu::Buffer::map_async is async; block here without extra crates.
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
-
-        // Ensure the mapping completes.
-        device.poll(wgpu::Maintain::Wait);
-
-        // Propagate mapping failure loudly (you can change to Result if preferred).
-        rx.recv()
-            .expect("map_async callback dropped")
-            .expect("buffer map failed");
-
         let mapped = slice.get_mapped_range();
-
-        // Strip per-row padding.
-        let mut out = vec![0u8; height * dst_bpr];
+        out.clear();
+        out.reserve(height * dst_bpr);
         for y in 0..height {
             let src0 = y * src_bpr;
-            let src1 = src0 + dst_bpr;
-            let dst0 = y * dst_bpr;
-            let dst1 = dst0 + dst_bpr;
-            out[dst0..dst1].copy_from_slice(&mapped[src0..src1]);
+            out.extend_from_slice(&mapped[src0..src0 + dst_bpr]);
         }
-
         drop(mapped);
-        self.buffer.unmap();
+        self.cancel_mapping();
+        Ok(true)
+    }
+}
 
-        out
+impl Drop for RenderTargetReadback {
+    fn drop(&mut self) {
+        self.cancel_mapping();
     }
 }
 
@@ -215,6 +258,23 @@ impl RenderTarget {
         self.size
     }
 
+    pub fn logical_size(&self) -> (u32, u32) {
+        self.logical_size
+    }
+
+    pub fn copy_to(&self, encoder: &mut wgpu::CommandEncoder, target: &Self) {
+        assert_eq!(self.size, target.size, "render target copy dimensions");
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            target.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.size.0,
+                height: self.size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     pub fn vertex_source<'a>(&'a self) -> VertexSource<'a> {
         VertexSource::VertexBuffer {
             vertex_buffer: &self.quad_vb,
@@ -244,26 +304,41 @@ impl RenderTarget {
         })
     }
 
-    /// Encode a GPU -> CPU readback of the full render target into an internal buffer.
-    /// The returned buffer is MAP_READ and must be mapped after submission.
-    pub fn encode_readback_rgba8(
+    /// Encode GPU -> CPU readback into caller-owned reusable storage.
+    /// Submit and finish mapping before encoding another copy into this buffer.
+    pub fn encode_readback_rgba8<'a>(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> RenderTargetReadback {
+        storage: &'a mut Option<RenderTargetReadback>,
+    ) -> &'a mut RenderTargetReadback {
         let width = self.size.0;
         let height = self.size.1;
         let bytes_per_row = 4u32.saturating_mul(width);
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = ((bytes_per_row + align - 1) / align) * align;
 
-        let buffer_size = (padded_bytes_per_row as u64) * (height as u64);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rfvp_render.render_target.readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        if storage.as_ref().is_none_or(|readback| {
+            readback.width != width || readback.height != height
+        }) {
+            let buffer_size = (padded_bytes_per_row as u64) * (height as u64);
+            *storage = Some(RenderTargetReadback {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("rfvp_render.render_target.readback"),
+                    size: buffer_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                width,
+                height,
+                bytes_per_row,
+                padded_bytes_per_row,
+                completion: Arc::new(AtomicU64::new(0)),
+                map_generation: 0,
+                map_deadline: None,
+            });
+        }
+        let readback = storage.as_mut().expect("readback storage initialized");
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -273,7 +348,7 @@ impl RenderTarget {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &buffer,
+                buffer: &readback.buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
@@ -287,13 +362,7 @@ impl RenderTarget {
             },
         );
 
-        RenderTargetReadback {
-            buffer,
-            width,
-            height,
-            bytes_per_row,
-            padded_bytes_per_row,
-        }
+        readback
     }
 }
 
@@ -303,3 +372,7 @@ impl Drop for RenderTarget {
         super::mem_stats::sub(&super::mem_stats::TARGET_BYTES, &super::mem_stats::TARGETS, w as u64 * h as u64 * 4);
     }
 }
+
+#[cfg(test)]
+#[path = "render_target_tests.rs"]
+mod tests;

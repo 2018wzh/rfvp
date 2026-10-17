@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::audio_player::{BgmPlayerSnapshotV1, SePlayerSnapshotV1};
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::motion_manager::MotionManagerSnapshotV1;
@@ -38,6 +39,9 @@ pub struct SaveStateSnapshotV1 {
 
 impl SaveStateSnapshotV1 {
     pub fn capture(game_data: &mut GameData) -> Self {
+        #[cfg(feature = "hosted")]
+        let globals_non_volatile = game_data.globals.snapshot_non_volatile();
+        #[cfg(not(feature = "hosted"))]
         let globals_non_volatile = GLOBAL.lock().unwrap().snapshot_non_volatile();
 
         let vm = match game_data.save_manager.take_pending_vm_snapshot() {
@@ -81,9 +85,14 @@ impl SaveStateSnapshotV1 {
             .apply_snapshot_v1(&self.audio.se, vfs)
             .context("apply SePlayerSnapshotV1")?;
 
+        #[cfg(not(feature = "hosted"))]
         {
             let mut g = GLOBAL.lock().unwrap();
             g.restore_non_volatile(&self.globals_non_volatile);
+        }
+        #[cfg(feature = "hosted")]
+        {
+            game_data.globals.restore_non_volatile(&self.globals_non_volatile);
         }
 
         tm.apply_snapshot_v1(&self.vm);

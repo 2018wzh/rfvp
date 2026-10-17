@@ -1046,7 +1046,7 @@ pub mod ring_log;
 
 pub mod perf;
 
-#[cfg(feature = "no_std")]
+#[cfg(any(feature = "no_std", feature = "hosted"))]
 pub mod no_std_core;
 
 #[cfg(feature = "no_std")]
@@ -1092,7 +1092,7 @@ pub mod rendering;
 pub mod rfvp_audio;
 #[cfg(all(not(feature = "no_std"), feature = "rfvp-os"))]
 pub mod rfvp_os_host;
-#[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
+#[cfg(any(feature = "hosted-gpu", all(not(feature = "no_std"), feature = "gpu-render")))]
 pub mod rfvp_render;
 pub mod script;
 #[cfg(all(not(feature = "no_std"), feature = "soft-render-desktop"))]

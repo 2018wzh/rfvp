@@ -1,6 +1,6 @@
 [package]
 name = "na_mpeg2_decoder"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rust MPEG-1/2 video decoder"
 

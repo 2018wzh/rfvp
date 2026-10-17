@@ -155,6 +155,7 @@ pub struct App {
     last_fullscreen_flag: i32,
 
     render_target: RenderTarget,
+    save_readback: Option<crate::rfvp_render::render_target::RenderTargetReadback>,
     resources: Arc<GpuCommonResources>,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
@@ -952,7 +953,7 @@ impl App {
             );
             let readback = self
                 .render_target
-                .encode_readback_rgba8(&self.resources.device, &mut encoder);
+                .encode_readback_rgba8(&self.resources.device, &mut encoder, &mut self.save_readback);
             self.resources.queue.submit(Some(encoder.finish()));
             let rgba = readback.map_to_rgba8(&self.resources.device);
             (readback.width, readback.height, rgba)
@@ -971,7 +972,7 @@ impl App {
                 );
                 let readback = self
                     .render_target
-                    .encode_readback_rgba8(&self.resources.device, &mut encoder);
+                    .encode_readback_rgba8(&self.resources.device, &mut encoder, &mut self.save_readback);
                 self.resources.queue.submit(Some(encoder.finish()));
                 let rgba = readback.map_to_rgba8(&self.resources.device);
                 if let Some(frame) = image::RgbaImage::from_raw(readback.width, readback.height, rgba) {
@@ -1122,7 +1123,7 @@ impl App {
         let dump_path = frame_dump_path(self.debug_frame_no);
         let dump_readback = dump_path.as_ref().map(|_| {
             self.render_target
-                .encode_readback_rgba8(&self.resources.device, &mut encoder)
+                .encode_readback_rgba8(&self.resources.device, &mut encoder, &mut self.save_readback)
         });
 
         // Pass 2: present to the swapchain with aspect-preserving scaling.
@@ -2872,6 +2873,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).pending_vm_frame_ms_valid).write(false);
 
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
+                ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
                 ptr::addr_of_mut!((*p).surface).write(surface);
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
@@ -3062,6 +3064,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).pending_vm_frame_ms_valid).write(false);
 
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
+                ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
                 ptr::addr_of_mut!((*p).surface).write(surface);
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
@@ -3263,6 +3266,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).pending_vm_frame_ms_valid).write(false);
 
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
+                ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
                 ptr::addr_of_mut!((*p).surface).write(surface);
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
@@ -3457,6 +3461,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).pending_vm_frame_ms_valid).write(false);
 
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
+                ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
                 ptr::addr_of_mut!((*p).surface).write(surface);
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);

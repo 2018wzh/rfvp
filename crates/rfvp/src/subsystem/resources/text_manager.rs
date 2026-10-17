@@ -23,6 +23,11 @@ use anyhow::{anyhow, bail, Result};
 use core_maths::CoreFloat;
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(feature = "hosted", not(feature = "no_std")))]
+mod hosted_fonts;
+#[cfg(all(feature = "hosted", not(feature = "no_std")))]
+pub use hosted_fonts::{SystemFontBindings, SystemFontFace};
+
 // Current font (reverse-engineered special id used by TextFont(..., -1, ...)).
 pub const FONTFACE_CURRENT: i32 = -1;
 // ＭＳ ゴシック
@@ -3267,6 +3272,14 @@ impl TextManager {
             return;
         }
         self.items[id as usize].arm_sync_print_wait(thread_id);
+    }
+
+    pub(crate) fn cancel_sync_print_waits(&mut self, thread_id: u32) {
+        for text in &mut self.items {
+            if thread_id == 0 || text.sync_wait_thread == Some(thread_id) {
+                text.clear_sync_print_wait();
+            }
+        }
     }
 
     pub fn collect_completed_sync_print_waiters(&mut self) -> Vec<u32> {

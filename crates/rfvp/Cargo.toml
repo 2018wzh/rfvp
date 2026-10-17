@@ -108,6 +108,12 @@ default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "r
 # mimalloc as the global allocator (desktop and mobile; never with `no_std`).
 mimalloc = ["dep:mimalloc"]
 
+# Embed the existing std runtime and native asset/rendering types without its window loop.
+hosted = ["runtime-core-deps", "image-formats", "uefi-zlib", "native-video"]
+
+# Reuse the native renderer when embedding the core without its window loop.
+hosted-gpu = ["hosted", "dep:wgpu"]
+
 # Independent no_std + alloc library surface. This feature intentionally does
 # not enable any runtime/backend dependency. Use it with:
 # cargo check -p rfvp --no-default-features --features no_std --lib

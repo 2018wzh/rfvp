@@ -116,6 +116,11 @@ pub trait AudioBackend: Send + Sync {
 
     /// Commands for the host, for backends that produce them ([`CommandBackend`]).
     fn drain_commands(&self, _out: &mut Vec<AudioCommand>) {}
+
+    #[cfg(feature = "hosted")]
+    fn host_commands(&self) -> Option<&CommandBackend> {
+        None
+    }
 }
 
 /// The audio output shared by the BGM and SE players.
@@ -162,23 +167,23 @@ impl AudioManager {
     }
 }
 
-#[cfg(feature = "no_std")]
+#[cfg(any(feature = "no_std", feature = "hosted"))]
 fn default_backend() -> Box<dyn AudioBackend> {
     Box::new(CommandBackend::new())
 }
 
-#[cfg(all(not(feature = "no_std"), feature = "audio", not(target_os = "uefi")))]
+#[cfg(all(not(any(feature = "no_std", feature = "hosted")), feature = "audio", not(target_os = "uefi")))]
 fn default_backend() -> Box<dyn AudioBackend> {
     Box::new(kira::KiraBackend::new())
 }
 
-#[cfg(all(not(feature = "no_std"), target_os = "uefi", feature = "anzu-audio"))]
+#[cfg(all(not(any(feature = "no_std", feature = "hosted")), target_os = "uefi", feature = "anzu-audio"))]
 fn default_backend() -> Box<dyn AudioBackend> {
     Box::new(anzu::AnzuBackend::new())
 }
 
 #[cfg(all(
-    not(feature = "no_std"),
+    not(any(feature = "no_std", feature = "hosted")),
     not(all(feature = "audio", not(target_os = "uefi"))),
     not(all(target_os = "uefi", feature = "anzu-audio"))
 ))]

@@ -210,6 +210,7 @@ struct WmvPlayback {
     last_presented_pts_ms: u32,
 
     stop_flag: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
 
     // We always upload scaled frames sized to the screen.
     screen_w: u32,
@@ -267,7 +268,7 @@ impl WmvPlayback {
         let (tx, rx) = crossbeam_channel::bounded::<WmvRgbaFrame>(2);
 
         // Video decode thread.
-        {
+        let worker = {
             let stop = stop_flag.clone();
             let path = wmv_path.clone();
             std::thread::spawn(move || {
@@ -315,8 +316,8 @@ impl WmvPlayback {
                         break;
                     }
                 }
-            });
-        }
+            })
+        };
 
         Ok(Self {
             rx,
@@ -325,6 +326,7 @@ impl WmvPlayback {
             base_pts_ms: None,
             last_presented_pts_ms: u32::MAX,
             stop_flag,
+            worker: Some(worker),
             screen_w,
             screen_h,
             audio_manager,
@@ -411,9 +413,20 @@ impl WmvPlayback {
         }
     }
 
-    fn stop_and_cleanup(mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+    fn stop_and_cleanup(self) {
+        drop(self);
+    }
+}
 
+impl Drop for WmvPlayback {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        self.rx = crossbeam_channel::never();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                log::error!("RFVP WMV decoder worker panicked during shutdown");
+            }
+        }
         if std::mem::take(&mut self.audio_playing) {
             if let Some(am) = self.audio_manager.as_ref() {
                 stop_movie_audio(am);
@@ -447,6 +460,7 @@ struct MpegPlayback {
     last_presented_pts_ms: i64,
 
     stop_flag: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
 
     // We always upload scaled frames sized to the screen.
     screen_w: u32,
@@ -504,7 +518,7 @@ impl MpegPlayback {
         let (tx, rx) = crossbeam_channel::bounded::<MpegRgbaFrame>(2);
 
         // Video decode thread.
-        {
+        let worker = {
             let stop = stop_flag.clone();
             let path = mpeg_path.clone();
             std::thread::spawn(move || {
@@ -584,8 +598,8 @@ impl MpegPlayback {
                         });
                     }
                 });
-            });
-        }
+            })
+        };
 
         Ok(Self {
             rx,
@@ -594,6 +608,7 @@ impl MpegPlayback {
             base_pts_ms: None,
             last_presented_pts_ms: i64::MIN,
             stop_flag,
+            worker: Some(worker),
             screen_w,
             screen_h,
             audio_manager,
@@ -673,9 +688,20 @@ impl MpegPlayback {
         }
     }
 
-    fn stop_and_cleanup(mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+    fn stop_and_cleanup(self) {
+        drop(self);
+    }
+}
 
+impl Drop for MpegPlayback {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        self.rx = crossbeam_channel::never();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                log::error!("RFVP MPEG decoder worker panicked during shutdown");
+            }
+        }
         if std::mem::take(&mut self.audio_playing) {
             if let Some(am) = self.audio_manager.as_ref() {
                 stop_movie_audio(am);

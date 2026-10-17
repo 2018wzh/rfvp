@@ -9,6 +9,7 @@ use alloc::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::flag_manager::FlagManager;
@@ -46,6 +47,12 @@ pub struct GlobalSaveDataV1 {
 
 impl GlobalSaveDataV1 {
     pub fn capture(game_data: &GameData) -> Self {
+        #[cfg(feature = "hosted")]
+        let (non_volatile_global_count, volatile_global_count, volatile_globals) = {
+            let globals = &game_data.globals;
+            (globals.non_volatile_count(), globals.volatile_count(), globals.snapshot_volatile_globals())
+        };
+        #[cfg(not(feature = "hosted"))]
         let (non_volatile_global_count, volatile_global_count, volatile_globals) = {
             let g = GLOBAL.lock().unwrap();
             (
@@ -95,6 +102,7 @@ impl GlobalSaveDataV1 {
             }
         }
 
+        #[cfg(not(feature = "hosted"))]
         {
             let mut g = GLOBAL.lock().unwrap();
             g.restore_volatile_globals(
@@ -103,6 +111,12 @@ impl GlobalSaveDataV1 {
                 &self.volatile_globals,
             );
         }
+        #[cfg(feature = "hosted")]
+        game_data.globals.restore_volatile_globals(
+            self.non_volatile_global_count,
+            self.volatile_global_count,
+            &self.volatile_globals,
+        );
 
         // Non-critical engine state.
         game_data

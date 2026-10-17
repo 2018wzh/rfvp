@@ -4,9 +4,11 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "no_std")]
 use core_maths::CoreFloat;
 use glam::{vec2, vec3, vec4, Mat4, Vec2, Vec4};
+use image::{DynamicImage, GenericImageView};
 
 use crate::host_api::{
-    CommandBlendMode, DrawImageCmd, HitProxy, HitProxyTable, PortableTextureDesc, PrimId, RectI16,
+    BlendMode, ColorRgba, CommandBlendMode, DrawImageCmd, HitProxy,
+    HitProxyTable, PortableTextureDesc, PrimId, RectI16, RectI32,
     RectU16, RenderBackend, RenderCommand, RenderFrame, RfvpError, RfvpResult, Rgba8,
     TextureBackend, TextureFormat, TextureHandle, Vertex2D,
 };
@@ -202,8 +204,8 @@ impl HostPrimRenderCache {
             return Err(RfvpError::CapacityExceeded);
         };
         let (format, pixels) = match img {
-            crate::DynamicImage::ImageRgba8(img) => (TextureFormat::Rgba8, img.as_raw().as_slice()),
-            crate::DynamicImage::ImageLumaA8(img) => {
+            DynamicImage::ImageRgba8(img) => (TextureFormat::Rgba8, img.as_raw().as_slice()),
+            DynamicImage::ImageLumaA8(img) => {
                 (TextureFormat::LumaA8, img.as_raw().as_slice())
             }
             #[cfg(feature = "psx")]
@@ -213,6 +215,8 @@ impl HostPrimRenderCache {
             }
             #[cfg(feature = "psx")]
             crate::DynamicImage::ImagePs1Mask(img) => (TextureFormat::Native(crate::ps1_mask::NATIVE_FORMAT), img.gpu.as_slice()),
+            #[cfg(not(feature = "no_std"))]
+            _ => return Err(RfvpError::Unsupported),
         };
         backend.create_texture(
             host_texture_id(graph_id),
@@ -532,7 +536,7 @@ where
     #[cfg(not(feature = "psx"))]
     {
         cache.mask_frame.prepare(motion);
-        if let Some(crate::DynamicImage::ImageRgba8(image)) = &cache.mask_frame.image {
+        if let Some(DynamicImage::ImageRgba8(image)) = &cache.mask_frame.image {
             let width = u16::try_from(image.width()).map_err(|_| RfvpError::CapacityExceeded)?;
             let height = u16::try_from(image.height()).map_err(|_| RfvpError::CapacityExceeded)?;
             let generation = cache.mask_frame.generation;
@@ -623,6 +627,7 @@ where
     crate::perf::stop(13, t);
     Ok(frame)
 }
+
 
 #[allow(clippy::too_many_arguments)]
 fn collect_tree<B>(
@@ -796,11 +801,7 @@ where
                 // The original engine's draw_color_tile() uses only the
                 // accumulated parent position plus the tile's X/Y and W/H.
                 // Tile primitives do not apply rotation, scale, pivot, or V3D.
-                let model = Mat4::from_translation(vec3(
-                    parent_x + draw_x,
-                    parent_y + draw_y,
-                    0.0,
-                ));
+                let model = Mat4::from_translation(vec3(parent_x + draw_x, parent_y + draw_y, 0.0));
                 emit_sprite(
                     commands,
                     hit_proxies,
@@ -976,10 +977,8 @@ fn emit_graph_sprite(
     let uv0 = vec2(u / tw as f32, v / th as f32);
     let uv1 = vec2((u + tex_w) / tw as f32, (v + tex_h) / th as f32);
     let color = vec4(1.0, 1.0, 1.0, draw_alpha);
-    let off_x = graph.get_offset_x() as f32
-        + if text_graph { text_draw_x } else { clip_x };
-    let off_y = graph.get_offset_y() as f32
-        + if text_graph { text_draw_y } else { clip_y };
+    let off_x = graph.get_offset_x() as f32 + if text_graph { text_draw_x } else { clip_x };
+    let off_y = graph.get_offset_y() as f32 + if text_graph { text_draw_y } else { clip_y };
     let (pivot_x, pivot_y) = if (attr & 2) != 0 {
         (prim.get_opx() as f32, prim.get_opy() as f32)
     } else {

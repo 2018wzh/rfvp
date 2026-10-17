@@ -25,7 +25,7 @@ use crate::rfvp_audio::AudioManager;
     any(
         target_os = "uefi",
         target_arch = "wasm32",
-        not(feature = "audio")
+        not(any(feature = "audio", feature = "hosted"))
     )
 ))]
 mod inline;
@@ -34,7 +34,7 @@ mod inline;
     not(target_os = "uefi"),
     not(target_arch = "wasm32"),
     feature = "native-video",
-    feature = "audio"
+    any(feature = "audio", feature = "hosted")
 ))]
 mod threaded;
 
@@ -91,7 +91,7 @@ pub struct MovieRequest<'a> {
     not(target_os = "uefi"),
     not(target_arch = "wasm32"),
     feature = "native-video",
-    feature = "audio"
+    any(feature = "audio", feature = "hosted")
 ))]
 use threaded::open;
 
@@ -101,7 +101,7 @@ use threaded::open;
     any(
         target_os = "uefi",
         target_arch = "wasm32",
-        not(feature = "audio")
+        not(any(feature = "audio", feature = "hosted"))
     )
 ))]
 use inline::open;

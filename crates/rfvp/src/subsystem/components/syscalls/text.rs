@@ -8,6 +8,7 @@ use alloc::{
 };
 use anyhow::Result;
 
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::Variant;
 use crate::subsystem::resources::input_manager::KeyCode;
@@ -611,6 +612,7 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 .motion_manager
                 .text_manager
                 .set_text_content(id, s);
+            #[cfg(not(feature = "hosted"))]
             super::legacy::on_legacy_text_print(s, id);
             let _ =
                 game_data
@@ -620,6 +622,9 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 & (1u32 << (KeyCode::Ctrl as u32)))
                 != 0;
             let pulse = game_data.inputs_manager.peek_control_pulse();
+            #[cfg(feature = "hosted")]
+            let global0 = game_data.hosted_global_int(0);
+            #[cfg(not(feature = "hosted"))]
             let global0 = GLOBAL.lock().unwrap().get_int_var(0);
             if game_data
                 .motion_manager
@@ -648,6 +653,7 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 .motion_manager
                 .text_manager
                 .set_text_content(id, s);
+            #[cfg(not(feature = "hosted"))]
             super::legacy::on_legacy_text_print(s, id);
             let _ =
                 game_data
@@ -657,6 +663,9 @@ pub fn text_print(game_data: &mut GameData, id: &Variant, content: &Variant) -> 
                 & (1u32 << (KeyCode::Ctrl as u32)))
                 != 0;
             let pulse = game_data.inputs_manager.peek_control_pulse();
+            #[cfg(feature = "hosted")]
+            let global0 = game_data.hosted_global_int(0);
+            #[cfg(not(feature = "hosted"))]
             let global0 = GLOBAL.lock().unwrap().get_int_var(0);
             if game_data
                 .motion_manager

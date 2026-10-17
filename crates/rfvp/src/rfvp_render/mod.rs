@@ -1,8 +1,11 @@
+#[cfg(feature = "hosted-gpu")]
+pub mod hosted;
 pub mod pipelines;
 pub mod render_target;
 pub mod texture;
 pub mod vertex_buffer;
 pub mod vertices;
+pub use wgpu;
 
 pub use pipelines::Pipelines;
 pub use render_target::RenderTarget;

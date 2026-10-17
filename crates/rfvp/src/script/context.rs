@@ -3,6 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
+#[cfg(not(feature = "hosted"))]
 use crate::script::global::GLOBAL;
 use crate::script::opcode::Opcode;
 use crate::script::parser::Parser;
@@ -654,6 +655,7 @@ impl Context {
 
     /// 0x0F push global
     /// push a global variable onto the stack
+    #[cfg(not(feature = "hosted"))]
     pub fn push_global(&mut self, parser: &mut Parser) -> Result<()> {
         self.cursor += 1;
         let key = parser.read_u16(self.cursor)?;
@@ -669,6 +671,19 @@ impl Context {
             self.push(Variant::Nil)?;
         }
         Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn push_global(
+        &mut self,
+        syscaller: &mut impl VmSyscall,
+        parser: &mut Parser,
+    ) -> Result<()> {
+        self.cursor += 1;
+        let key = parser.read_u16(self.cursor)?;
+        self.cursor += size_of::<u16>();
+        let value = syscaller.with_globals(|globals| globals.get(key).cloned());
+        self.push(value.unwrap_or(Variant::Nil))
     }
 
     /// 0x10 push stack
@@ -689,6 +704,7 @@ impl Context {
     /// push a value than stored in the global table by immediate key onto the stack
     /// we assume that if any failure occurs, such as the key not found,
     /// we will push a nil value onto the stack for compatibility reasons.
+    #[cfg(not(feature = "hosted"))]
     pub fn push_global_table(&mut self, parser: &mut Parser) -> Result<()> {
         self.cursor += 1;
         let key = parser.read_u16(self.cursor)?;
@@ -712,6 +728,28 @@ impl Context {
 
         self.push(out)?;
         Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn push_global_table(
+        &mut self,
+        syscaller: &mut impl VmSyscall,
+        parser: &mut Parser,
+    ) -> Result<()> {
+        self.cursor += 1;
+        let key = parser.read_u16(self.cursor)?;
+        self.cursor += size_of::<u16>();
+        let table_key = self.pop()?;
+        let value = syscaller.with_globals(|globals| {
+            globals.get_mut(key).and_then(|value| {
+                value.as_table().and_then(|table| {
+                    table_key
+                        .as_int()
+                        .and_then(|key| table.get(key as u32).cloned())
+                })
+            })
+        });
+        self.push(value.unwrap_or(Variant::Nil))
     }
 
     /// 0x12 push local table
@@ -760,6 +798,7 @@ impl Context {
 
     /// 0x15 pop global
     /// pop the top of the stack and store it in the global table
+    #[cfg(not(feature = "hosted"))]
     pub fn pop_global(&mut self, parser: &mut Parser) -> Result<()> {
         self.cursor += 1;
         let key = parser.read_u16(self.cursor)?;
@@ -767,6 +806,20 @@ impl Context {
 
         let value = self.pop()?;
         GLOBAL.lock().unwrap().set(key, value);
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn pop_global(
+        &mut self,
+        syscaller: &mut impl VmSyscall,
+        parser: &mut Parser,
+    ) -> Result<()> {
+        self.cursor += 1;
+        let key = parser.read_u16(self.cursor)?;
+        self.cursor += size_of::<u16>();
+        let value = self.pop()?;
+        syscaller.with_globals(|globals| globals.set(key, value));
         Ok(())
     }
 
@@ -785,6 +838,7 @@ impl Context {
 
     /// 0x17 pop global table
     /// pop the top of the stack and store it in the global table by key
+    #[cfg(not(feature = "hosted"))]
     pub fn pop_global_table(&mut self, parser: &mut Parser) -> Result<()> {
         self.cursor += 1;
         let key = parser.read_u16(self.cursor)?;
@@ -810,6 +864,34 @@ impl Context {
                 tbl.insert(mkey_i as u32, value);
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "hosted")]
+    pub fn pop_global_table(
+        &mut self,
+        syscaller: &mut impl VmSyscall,
+        parser: &mut Parser,
+    ) -> Result<()> {
+        self.cursor += 1;
+        let key = parser.read_u16(self.cursor)?;
+        self.cursor += size_of::<u16>();
+        let value = self.pop()?;
+        let table_key = self.pop()?;
+        syscaller.with_globals(|globals| {
+            let Some(table_key) = table_key.as_int() else {
+                globals.set(key, Variant::Nil);
+                return;
+            };
+            if let Some(destination) = globals.get_mut(key) {
+                if !destination.is_table() {
+                    destination.cast_table();
+                }
+                if let Some(table) = destination.as_table() {
+                    table.insert(table_key as u32, value);
+                }
+            }
+        });
         Ok(())
     }
 
@@ -1175,12 +1257,18 @@ impl Context {
                 self.push_string(parser)?;
             }
             Ok(Opcode::PushGlobal) => {
+                #[cfg(feature = "hosted")]
+                self.push_global(syscaller, parser)?;
+                #[cfg(not(feature = "hosted"))]
                 self.push_global(parser)?;
             }
             Ok(Opcode::PushStack) => {
                 self.push_stack(parser)?;
             }
             Ok(Opcode::PushGlobalTable) => {
+                #[cfg(feature = "hosted")]
+                self.push_global_table(syscaller, parser)?;
+                #[cfg(not(feature = "hosted"))]
                 self.push_global_table(parser)?;
             }
             Ok(Opcode::PushLocalTable) => {
@@ -1193,12 +1281,18 @@ impl Context {
                 self.push_return_value()?;
             }
             Ok(Opcode::PopGlobal) => {
+                #[cfg(feature = "hosted")]
+                self.pop_global(syscaller, parser)?;
+                #[cfg(not(feature = "hosted"))]
                 self.pop_global(parser)?;
             }
             Ok(Opcode::PopStack) => {
                 self.local_copy(parser)?;
             }
             Ok(Opcode::PopGlobalTable) => {
+                #[cfg(feature = "hosted")]
+                self.pop_global_table(syscaller, parser)?;
+                #[cfg(not(feature = "hosted"))]
                 self.pop_global_table(parser)?;
             }
             Ok(Opcode::PopLocalTable) => {

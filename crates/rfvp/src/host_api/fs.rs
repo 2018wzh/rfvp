@@ -123,18 +123,28 @@ pub trait RfvpFileSystem {
         None
     }
 
-    /// The platform's own data directory, where each game gets a folder for its saves
-    /// (`saves/<game>/`), so that putting another game in the game directory loses nothing. A
-    /// host without one keeps the saves in the game directory (`storage`).
     fn save_storage(&mut self) -> Option<Arc<dyn RfvpStorage>> {
         None
     }
 
-    /// Read access to the game's own directory, for assets that are loose files instead of in a
-    /// pack (a folder such as `graph/` next to the `.bin` files). Paths are relative to the
-    /// game directory.
     fn game_files(&mut self) -> Option<Arc<dyn RfvpStorage>> {
         None
+    }
+
+    fn remove(&mut self, _path: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn copy(&mut self, _source: &str, _destination: &str) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
+    }
+
+    fn list(
+        &mut self,
+        _root: &str,
+        _visitor: &mut dyn FnMut(&str, RfvpFileInfo) -> RfvpResult<()>,
+    ) -> RfvpResult<()> {
+        Err(RfvpError::Unsupported)
     }
 
     fn metadata(&mut self, path: &str) -> RfvpResult<RfvpFileInfo>;
