@@ -111,6 +111,11 @@ pub trait AudioBackend: Send + Sync {
 
     fn set_master_volume(&self, volume: f32);
 
+    /// Suspend the native device voices without discarding playback position.
+    fn set_paused(&self, _paused: bool) -> Result<()> {
+        anyhow::bail!("audio backend does not support suspension")
+    }
+
     /// Advance a backend that mixes on the engine's thread.
     fn tick(&self, _delta_ms: u32) {}
 

@@ -121,6 +121,20 @@ fn streaming_data(source: &SoundSource, vfs: &Vfs) -> Result<StreamingSoundData<
 }
 
 impl AudioBackend for KiraBackend {
+    fn set_paused(&self, paused: bool) -> Result<()> {
+        let tween = kira::Tween { duration: std::time::Duration::ZERO, ..Default::default() };
+        for channel in self.channels().values_mut() {
+            if let Some(handle) = channel.handle.as_mut() {
+                if paused {
+                    handle.pause(tween);
+                } else {
+                    handle.resume(tween);
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn load(&self, id: AudioStreamId, source: &SoundSource, vfs: &Vfs) -> Result<()> {
         // Decode the header now so a bad file fails here rather than when it is played.

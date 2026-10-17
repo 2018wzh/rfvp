@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -52,100 +52,75 @@ pub enum EngineEvent {
 pub struct VmWorker {
     tx: Sender<EngineEvent>,
     input_signal_pending: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+    cancellation: Arc<AtomicBool>,
+    timeline_epoch: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
 }
 
 impl VmWorker {
     pub fn spawn(
         game_data: Arc<RwLock<Box<GameData>>>,
+        parser: Parser,
+        script_engine: ThreadManager,
+    ) -> Self {
+        Self::spawn_with_cancellation(game_data, parser, script_engine, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn spawn_with_cancellation(
+        game_data: Arc<RwLock<Box<GameData>>>,
         mut parser: Parser,
         script_engine: ThreadManager,
+        cancellation: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<EngineEvent>();
         let input_signal_pending = Arc::new(AtomicBool::new(false));
         let worker_input_signal_pending = Arc::clone(&input_signal_pending);
+        let timeline_epoch = Arc::new(AtomicU64::new(1));
+        let worker_epoch = timeline_epoch.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = failed.clone();
+        let worker_cancel = cancellation.clone();
 
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("rfvp-vm".to_string())
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let mut vm = VmRunner::new(script_engine);
+                vm.set_cancellation(worker_cancel.clone());
 
                 while let Ok(ev) = rx.recv() {
-                    match ev {
+                    if worker_cancel.load(Ordering::Acquire) { break; }
+                    let (frame_ms, frame_done, dissolve_done, phase) = match ev {
                         EngineEvent::Stop => break,
-                        EngineEvent::Frame { frame_ms } => {
-                            // Tick the VM with a short critical section.
-                            // The main thread should avoid holding the write lock during AboutToWait.
-                            let mut gd = match game_data.write() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
-                            if gd.get_halt() {
-                                // If the VM asked to halt, do not progress this frame.
-                                continue;
-                            }
-                            if let Err(e) = vm.tick(&mut **gd, &mut parser, frame_ms) {
-                                log::error!("VM thread tick error: {e:?}");
-                                // Keep running; scripts may recover depending on engine behavior.
-                            }
-                        }
-                        EngineEvent::FrameSync { frame_ms, done } => {
-                            let mut gd = match game_data.write() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
-                            let mut report = VmTickReport::default();
-                            if !gd.get_halt() {
-                                match vm.tick(&mut **gd, &mut parser, frame_ms) {
-                                    Ok(r) => report = r,
-                                    Err(e) => {
-                                        log::error!("VM thread tick error: {e:?}");
-                                    }
-                                }
-                            }
-                            let _ = done.send(report);
-                        }
-                        EngineEvent::DissolveDone => {
-                            let mut gd = match game_data.write() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
-                            if gd.get_halt() {
-                                continue;
-                            }
-                            // Zero-delta tick: only advances internal state (e.g., clears DISSOLVE_WAIT)
-                            // based on already-updated global motion state.
-                            if let Err(e) = vm.tick(&mut **gd, &mut parser, 0) {
-                                log::error!("VM thread tick error (dissolve done): {e:?}");
-                            }
-                        }
-                        EngineEvent::DissolveDoneSync { done } => {
-                            let mut gd = match game_data.write() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
-                            if !gd.get_halt() {
-                                if let Err(e) = vm.tick(&mut **gd, &mut parser, 0) {
-                                    log::error!("VM thread tick error (dissolve done): {e:?}");
-                                }
-                            }
-                            let _ = done.send(());
-                        }
+                        EngineEvent::Frame { frame_ms } => (frame_ms, None, None, "frame"),
+                        EngineEvent::FrameSync { frame_ms, done } => (frame_ms, Some(done), None, "frame"),
+                        EngineEvent::DissolveDone => (0, None, None, "dissolve done"),
+                        EngineEvent::DissolveDoneSync { done } => (0, None, Some(done), "dissolve done"),
                         EngineEvent::InputSignal => {
                             worker_input_signal_pending.store(false, Ordering::Release);
-                            let mut gd = match game_data.write() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
-                            if gd.get_halt() {
-                                continue;
+                            (0, None, None, "input signal")
+                        }
+                    };
+                    let mut gd = match game_data.write() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let mut report = VmTickReport::default();
+                    if !gd.get_halt() {
+                        match vm.tick(&mut **gd, &mut parser, frame_ms) {
+                            Ok(completed) => {
+                                if completed.timeline_reset { worker_epoch.fetch_add(1, Ordering::AcqRel); }
+                                report = completed;
                             }
-                            // Zero-delta tick: lets scripts observe the already-updated
-                            // input state immediately (e.g., polling InputGetEvent).
-                            if let Err(e) = vm.tick(&mut **gd, &mut parser, 0) {
-                                log::error!("VM thread tick error (input signal): {e:?}");
+                            Err(error) => {
+                                log::error!("VM thread tick error ({phase}): {error:?}");
+                                worker_failed.store(true, Ordering::Release);
                             }
                         }
                     }
+                    if let Some(done) = frame_done { let _ = done.send(report); }
+                    if let Some(done) = dissolve_done { let _ = done.send(()); }
                 }
             })
             .expect("failed to spawn VM thread");
@@ -153,6 +128,24 @@ impl VmWorker {
         Self {
             tx,
             input_signal_pending,
+            worker: Some(worker),
+            cancellation,
+            timeline_epoch,
+            failed,
+        }
+    }
+
+    pub fn timeline_epoch(&self) -> u64 { self.timeline_epoch.load(Ordering::Acquire) }
+    pub fn has_failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
+
+    /// Stop and join before the owning App releases audio, saves or global state.
+    pub fn shutdown(&mut self) {
+        self.cancellation.store(true, Ordering::Release);
+        let _ = self.tx.send(EngineEvent::Stop);
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                log::error!("RFVP VM worker panicked during shutdown");
+            }
         }
     }
 
@@ -184,8 +177,13 @@ impl VmWorker {
             frame_ms,
             done: done_tx,
         });
-        // If the VM thread is gone, treat it as a no-op.
-        done_rx.recv().unwrap_or_default()
+        match done_rx.recv() {
+            Ok(report) => report,
+            Err(_) => {
+                self.failed.store(true, Ordering::Release);
+                VmTickReport::default()
+            }
+        }
     }
 
     #[inline]
@@ -194,6 +192,14 @@ impl VmWorker {
         let _ = self
             .tx
             .send(EngineEvent::DissolveDoneSync { done: done_tx });
-        let _ = done_rx.recv();
+        if done_rx.recv().is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for VmWorker {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

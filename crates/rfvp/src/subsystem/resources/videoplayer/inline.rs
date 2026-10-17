@@ -333,6 +333,13 @@ fn rgba_scale_nearest(
 }
 
 impl MovieSource for WmvPlayback {
+    #[cfg(not(target_os = "uefi"))]
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(start) = self.started_at.as_mut() {
+            *start += elapsed;
+        }
+    }
+
     fn next_frame(&mut self) -> Result<Option<MovieFrame>> {
         let Some(frame) = self.next_due_frame()? else {
             return Ok(None);
@@ -358,6 +365,13 @@ impl MovieSource for WmvPlayback {
 }
 
 impl MovieSource for MpegPlayback {
+    #[cfg(not(target_os = "uefi"))]
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(start) = self.started_at.as_mut() {
+            *start += elapsed;
+        }
+    }
+
     fn next_frame(&mut self) -> Result<Option<MovieFrame>> {
         let Some(frame) = self.next_due_frame()? else {
             return Ok(None);

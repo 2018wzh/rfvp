@@ -1086,6 +1086,12 @@ fn stop_movie_audio(audio: &AudioManager) {
 
 #[cfg(feature = "mp4")]
 impl MovieSource for Mp4Playback {
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(start) = self.started_at.as_mut() {
+            *start += elapsed;
+        }
+    }
+
     fn next_frame(&mut self) -> Result<Option<MovieFrame>> {
         let Some(frame) = self.next_due_frame() else {
             return Ok(None);
@@ -1111,6 +1117,12 @@ impl MovieSource for Mp4Playback {
 }
 
 impl MovieSource for WmvPlayback {
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(start) = self.started_at.as_mut() {
+            *start += elapsed;
+        }
+    }
+
     fn next_frame(&mut self) -> Result<Option<MovieFrame>> {
         let Some(frame) = self.next_due_frame() else {
             return Ok(None);
@@ -1136,6 +1148,12 @@ impl MovieSource for WmvPlayback {
 }
 
 impl MovieSource for MpegPlayback {
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(start) = self.started_at.as_mut() {
+            *start += elapsed;
+        }
+    }
+
     fn next_frame(&mut self) -> Result<Option<MovieFrame>> {
         let Some(frame) = self.next_due_frame() else {
             return Ok(None);

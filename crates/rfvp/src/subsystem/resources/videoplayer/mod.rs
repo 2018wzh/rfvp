@@ -68,6 +68,10 @@ pub trait MovieSource: Send + Sync {
     /// The frame to show now, if a new one is due.
     fn next_frame(&mut self) -> Result<Option<MovieFrame>>;
 
+    /// Remove host suspension time from the movie's presentation clock.
+    #[cfg(not(target_os = "uefi"))]
+    fn resume_after(&mut self, elapsed: crate::platform_time::Duration);
+
     fn is_finished(&mut self) -> Result<bool>;
 
     /// Stop decoding and the soundtrack.
@@ -150,6 +154,13 @@ impl VideoPlayerManager {
 
     pub fn is_modal_active(&self) -> bool {
         self.playing && self.modal
+    }
+
+    #[cfg(not(target_os = "uefi"))]
+    pub fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
+        if let Some(source) = self.source.as_mut() {
+            source.resume_after(elapsed);
+        }
     }
 
     /// Start a movie, replacing the one playing.

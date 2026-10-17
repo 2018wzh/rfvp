@@ -33,6 +33,8 @@ fn read_slot_for_load(game: &GameData, slot: u32) -> Result<Vec<u8>> {
 #[derive(Debug)]
 pub struct VmRunner {
     tm: ThreadManager,
+    #[cfg(not(feature = "no_std"))]
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 
@@ -43,7 +45,6 @@ pub struct VmTickReport {
     pub forced_yield: bool,
     /// Reserved for compatibility with the existing host/worker interface.
     pub forced_yield_contexts: u32,
-    #[cfg(feature = "hosted")]
     pub timeline_reset: bool,
 }
 
@@ -51,7 +52,14 @@ impl VmRunner {
     pub fn new(tm: ThreadManager) -> Self {
         Self {
             tm,
+            #[cfg(not(feature = "no_std"))]
+            cancellation: None,
         }
+    }
+
+    #[cfg(not(feature = "no_std"))]
+    pub fn set_cancellation(&mut self, cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.cancellation = Some(cancellation);
     }
 
     pub fn thread_manager(&self) -> &ThreadManager {
@@ -111,7 +119,6 @@ impl VmRunner {
         // Process deferred load requests at a safe point (between VM ticks).
         uefi_vm_stage!("[UEFI] VmRunner::tick before take_load_request");
         if let Some(slot) = game.save_manager.take_load_request() {
-            #[cfg(feature = "hosted")]
             let mut restored = false;
             match read_slot_for_load(game, slot) {
                 Ok(bytes) => {
@@ -131,7 +138,6 @@ impl VmRunner {
                         Ok(Some(s)) => {
                             match s.apply(game, &mut self.tm) {
                                 Ok(()) => {
-                                    #[cfg(feature = "hosted")]
                                     { restored = true; }
                                 }
                                 Err(e) => log::error!("load: apply SaveStateSnapshotV1 failed: {:#}", e),
@@ -165,7 +171,6 @@ impl VmRunner {
                 game.debug_vm_mut().update_from_thread_manager(&self.tm);
             }
             let mut report = VmTickReport::default();
-            #[cfg(feature = "hosted")]
             { report.timeline_reset = restored; }
             return Ok(report);
         }
@@ -369,6 +374,10 @@ impl VmRunner {
             tid
         );
         while !self.tm.get_context_should_break(tid) {
+            #[cfg(not(feature = "no_std"))]
+            if self.cancellation.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                anyhow::bail!("RFVP_VM_CANCELLED");
+            }
             uefi_vm_stage!("[UEFI] run_one_context before dispatch tid={}", tid);
             #[cfg(feature = "hosted")]
             let instruction_pc = self.tm.contexts[tid as usize].get_pc();

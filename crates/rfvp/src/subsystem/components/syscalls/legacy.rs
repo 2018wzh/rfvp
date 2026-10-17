@@ -95,6 +95,16 @@ struct LegacyUiState {
     save_load_menu_visible: bool,
 }
 
+/// A new native App must not inherit another game's one-shot config, text
+/// history, character volume table or pending modal state in a resident library.
+pub fn reset_native_session_state() -> Result<()> {
+    LEGACY_CHR_TABLE.lock().map_err(|_| anyhow::anyhow!("RFVP_LEGACY_STATE_POISONED"))?.clear();
+    LEGACY_TEXT_STATE.lock().map_err(|_| anyhow::anyhow!("RFVP_LEGACY_STATE_POISONED"))?.clear();
+    *LEGACY_CONFIG_STATE.lock().map_err(|_| anyhow::anyhow!("RFVP_LEGACY_STATE_POISONED"))? = LegacyConfigState::default();
+    *LEGACY_UI_STATE.lock().map_err(|_| anyhow::anyhow!("RFVP_LEGACY_STATE_POISONED"))? = LegacyUiState::default();
+    Ok(())
+}
+
 fn normalize_prefix(prefix: &str) -> String {
     if prefix.is_empty() {
         return String::new();
