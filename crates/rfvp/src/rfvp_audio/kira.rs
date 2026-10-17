@@ -59,6 +59,8 @@ struct Channel {
 pub struct KiraBackend {
     manager: Mutex<KiraAudioManager>,
     channels: Mutex<HashMap<u32, Channel>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    decoder_owner: Mutex<kira::sound::streaming::DecoderOwner>,
 }
 
 impl KiraBackend {
@@ -80,6 +82,8 @@ impl KiraBackend {
         Self {
             manager: Mutex::new(manager),
             channels: Mutex::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            decoder_owner: Mutex::new(kira::sound::streaming::DecoderOwner::new()),
         }
     }
 
@@ -121,6 +125,25 @@ fn streaming_data(source: &SoundSource, vfs: &Vfs) -> Result<StreamingSoundData<
 }
 
 impl AudioBackend for KiraBackend {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shutdown(&self) -> Result<()> {
+        let device = self.manager.lock().unwrap_or_else(|poison| poison.into_inner())
+            .backend_mut().stop_and_join();
+        let decoders = self.decoder_owner.lock().unwrap_or_else(|poison| poison.into_inner())
+            .stop_and_join();
+        anyhow::ensure!(device.is_ok(), "RFVP_AUDIO_DEVICE_WORKER_PANICKED");
+        anyhow::ensure!(decoders.is_ok(), "RFVP_AUDIO_DECODER_WORKER_PANICKED");
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_paused(&self, paused: bool) -> Result<()> {
+        self.manager.lock().unwrap_or_else(|poison| poison.into_inner())
+            .backend_mut().set_suspended(paused);
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn set_paused(&self, paused: bool) -> Result<()> {
         let tween = kira::Tween { duration: std::time::Duration::ZERO, ..Default::default() };
         for channel in self.channels().values_mut() {
@@ -178,10 +201,11 @@ impl AudioBackend for KiraBackend {
             if params.repeat {
                 sound = sound.loop_region(Region::default());
             }
+            let mut owner = self.decoder_owner.lock().unwrap_or_else(|poison| poison.into_inner());
             self.manager
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .play(sound)
+                .play(sound.with_decoder_owner(&mut owner))
                 .map_err(|err| anyhow!("play audio stream {}: {err:?}", id.0))?
         };
 

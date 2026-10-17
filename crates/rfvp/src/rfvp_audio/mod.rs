@@ -116,6 +116,11 @@ pub trait AudioBackend: Send + Sync {
         anyhow::bail!("audio backend does not support suspension")
     }
 
+    /// Stop the device and join native audio workers from the game owner.
+    fn shutdown(&self) -> Result<()> {
+        anyhow::bail!("audio backend does not support joined shutdown")
+    }
+
     /// Advance a backend that mixes on the engine's thread.
     fn tick(&self, _delta_ms: u32) {}
 
