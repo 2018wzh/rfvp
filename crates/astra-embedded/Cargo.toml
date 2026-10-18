@@ -1,0 +1,20 @@
+[package]
+name = "rfvp-astra-embedded"
+version = "0.6.0"
+edition = "2021"
+license = "MPL-2.0"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin-export = ["astra-emu-abi/diagnostic-bridge"]
+native-dylib-export = ["dynamic-plugin-export"]
+
+[dependencies]
+rfvp = { path = "../rfvp", default-features = false, features = ["embedded", "runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging"] }
+astra-emu-abi = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "3c7762ad533c8641af51b8aff81794dc377e23a9" }
+anyhow = "1"
+parking_lot = "0.12"
+winit = "0.30.5"

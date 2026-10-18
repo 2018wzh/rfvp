@@ -137,6 +137,7 @@ impl VmWorker {
 
     pub fn timeline_epoch(&self) -> u64 { self.timeline_epoch.load(Ordering::Acquire) }
     pub fn has_failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
+    pub fn is_cancelled(&self) -> bool { self.cancellation.load(Ordering::Acquire) }
 
     /// Stop and join before the owning App releases audio, saves or global state.
     pub fn shutdown(&mut self) {

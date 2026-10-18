@@ -413,6 +413,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "astra-emu-abi"
+version = "0.1.0"
+source = "git+https://github.com/2018wzh/AstraEngine.git?rev=3c7762ad533c8641af51b8aff81794dc377e23a9#3c7762ad533c8641af51b8aff81794dc377e23a9"
+dependencies = [
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1234,8 +1244,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "873dab07c8f743075e57f524c583985fbaf745602acbe916a01539364369a779"
+source = "git+https://github.com/2018wzh/cpal.git?rev=65ac8a6ac1a635cc26bfc5af331295b052044908#65ac8a6ac1a635cc26bfc5af331295b052044908"
 dependencies = [
  "alsa",
  "core-foundation-sys",
@@ -1829,7 +1838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2180,7 +2189,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2940,7 +2949,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3178,8 +3187,7 @@ dependencies = [
 [[package]]
 name = "kira"
 version = "0.10.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e7f96b236a2d8b1ecebcd0e4e81462405392699e261f852cf930ea150f15abd"
+source = "git+https://github.com/2018wzh/kira.git?rev=d2f10db15d9c451c7b2fd33043ae7732e75bee5d#d2f10db15d9c451c7b2fd33043ae7732e75bee5d"
 dependencies = [
  "atomic-arena",
  "cpal",
@@ -3720,7 +3728,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4800,6 +4808,7 @@ dependencies = [
  "core_maths",
  "cpal",
  "crossbeam-channel",
+ "d3d12",
  "egui 0.27.2",
  "egui-wgpu 0.27.2",
  "encoding_rs",
@@ -4827,6 +4836,7 @@ dependencies = [
  "mp4",
  "na_mpeg2_decoder",
  "ndk-context",
+ "parking_lot",
  "petitset",
  "pollster 0.4.0",
  "postcard",
@@ -4852,6 +4862,7 @@ dependencies = [
  "web-sys",
  "web-time 1.1.0",
  "wgpu 0.19.4",
+ "windows 0.62.2",
  "winit 0.30.13",
  "wmv-decoder",
 ]
@@ -4861,6 +4872,17 @@ name = "rfvp-3ds"
 version = "0.1.0"
 dependencies = [
  "rfvp",
+]
+
+[[package]]
+name = "rfvp-astra-embedded"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "astra-emu-abi",
+ "parking_lot",
+ "rfvp",
+ "winit 0.30.13",
 ]
 
 [[package]]
@@ -5123,7 +5145,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5822,7 +5844,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7088,7 +7110,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
