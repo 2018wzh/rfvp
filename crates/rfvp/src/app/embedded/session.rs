@@ -1,4 +1,4 @@
-use super::{Delivery, Duration, EmbeddedApp, Nls, Result};
+use super::{Duration, EmbeddedApp, Nls, Result};
 use parking_lot::Mutex;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender, TrySendError}};
 use std::thread::{self, JoinHandle};
@@ -9,8 +9,6 @@ pub struct Frame {
     pub pixels: Vec<u8>,
     pub generation: u64,
     pub timestamp_ns: u64,
-    #[cfg(windows)]
-    pub gpu: Option<super::d3d12::GpuFrame>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,20 +52,11 @@ pub struct NativeSession {
     platform: Arc<dyn Platform>,
     pub logical: (u32, u32),
     pub raster: (u32, u32),
-    pub gpu_delivery: bool,
 }
 
 impl NativeSession {
-    pub fn open(root: String, nls: Nls, scale: f64, translation_table: String, subtitle_map: String, platform: Arc<dyn Platform>, initially_suspended: bool) -> Result<Self> {
-        Self::open_with_delivery(root, nls, scale, translation_table, subtitle_map, platform, initially_suspended, Delivery::Cpu)
-    }
-
-    pub fn open_with_delivery(root: String, nls: Nls, scale: f64, translation_table: String, subtitle_map: String, platform: Arc<dyn Platform>,
-        initially_suspended: bool, delivery: Delivery) -> Result<Self> {
-        #[cfg(windows)]
-        let gpu_delivery = matches!(delivery, Delivery::D3D12(_));
-        #[cfg(not(windows))]
-        let gpu_delivery = false;
+    pub fn open(root: String, nls: Nls, render_extent: (u32, u32), translation_table: String, subtitle_map: String,
+        platform: Arc<dyn Platform>, initially_suspended: bool) -> Result<Self> {
         let (commands, receiver) = mpsc::sync_channel(256);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let cancellation = Arc::new(AtomicBool::new(platform.is_cancelled()));
@@ -80,7 +69,7 @@ impl NativeSession {
         let worker = thread::Builder::new().name("rfvp-embedded".into()).stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                    let mut app = match EmbeddedApp::open_with_delivery(&root, nls, scale, &translation_table, &subtitle_map, worker_cancel.clone(), delivery) {
+                    let mut app = match EmbeddedApp::open(&root, nls, render_extent, &translation_table, &subtitle_map, worker_cancel.clone()) {
                         Ok(app) => app,
                         Err(error) => {
                             let _ = startup_tx.send(Err(format!("{error:#}")));
@@ -94,12 +83,10 @@ impl NativeSession {
                         worker_snapshot.lock().state = RunState::Paused;
                     }
                     let _ = startup_tx.send(Ok((logical, raster)));
-                    let mut pool: Option<[Arc<Frame>; 3]> = (!gpu_delivery).then(|| std::array::from_fn(|_| Arc::new(Frame {
+                    let mut pool: [Arc<Frame>; 3] = std::array::from_fn(|_| Arc::new(Frame {
                         pixels: Vec::with_capacity(raster.0 as usize * raster.1 as usize * 4),
                         generation: 0, timestamp_ns: 0,
-                        #[cfg(windows)]
-                        gpu: None,
-                    })));
+                    }));
                     let mut capture: Option<usize> = None;
                     let mut generation = 0u64;
                     let mut suspended = initially_suspended;
@@ -143,7 +130,6 @@ impl NativeSession {
                             }
                         }
                         if let Some(slot) = capture {
-                            let pool = pool.as_mut().expect("CPU capture has a CPU pool");
                             let frame = Arc::get_mut(&mut pool[slot]).expect("capture slot is private");
                             if app.poll_capture(&mut frame.pixels)? {
                                 generation = generation.checked_add(1).ok_or_else(|| anyhow::anyhow!("RFVP_FRAME_GENERATION_EXHAUSTED"))?;
@@ -176,17 +162,7 @@ impl NativeSession {
                                 worker_snapshot.lock().state = RunState::Running;
                             }
                             deadline = previous + cadence;
-                            #[cfg(windows)]
-                            if gpu_delivery {
-                                let next = generation.checked_add(1).ok_or_else(|| anyhow::anyhow!("RFVP_FRAME_GENERATION_EXHAUSTED"))?;
-                                let timestamp_ns = now.duration_since(origin).as_nanos().min(u64::MAX as u128) as u64;
-                                if let Some(frame) = app.publish_gpu(next, timestamp_ns)? {
-                                    generation = next;
-                                    worker_snapshot.lock().frame = Some(frame);
-                                }
-                            }
-                            if !gpu_delivery && capture.is_none() {
-                                let pool = pool.as_mut().expect("CPU delivery has a CPU pool");
+                            if capture.is_none() {
                                 if let Some(slot) = pool.iter().position(|frame| Arc::strong_count(frame) == 1) {
                                     Arc::get_mut(&mut pool[slot]).expect("unleased frame").timestamp_ns =
                                         now.duration_since(origin).as_nanos().min(u64::MAX as u128) as u64;
@@ -250,7 +226,7 @@ impl NativeSession {
         match startup {
             Ok(Ok((logical, raster))) => Ok(Self {
                 commands, cancellation, snapshot, waker: worker.thread().clone(),
-                worker: Mutex::new(Some(worker)), platform, logical, raster, gpu_delivery,
+                worker: Mutex::new(Some(worker)), platform, logical, raster,
             }),
             outcome => {
                 cancellation.store(true, Ordering::Release);

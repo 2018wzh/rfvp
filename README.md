@@ -71,7 +71,12 @@ The latest mapped playback start owns the track. Stop/end removes it, restart re
 it, and a restored VM timeline invalidates the old renderer. Pausing adds no subtitle
 clock. Rendering uses the shared libass component, updates only changed subtitle masks,
 and draws through the existing sprite pipeline before the custom/system-page overlay,
-for both CPU frame delivery and D3D12 exports. No game frame is copied for compositing.
+before CPU frame delivery. No game frame is copied for compositing.
+
+The Astra embedded core (C ABI v3) delivers frames only as CPU leases. The host chooses the
+raster size through `OpenRequest.render_extent` (declared range 160x90 to 8192x8192, aspect
+preserved): 0x0 keeps the logical size; otherwise the scale is `min(w / logical_w, h / logical_h)`
+clamped to 0.25-4.0, and the raster is the rounded scaled logical size.
 WMV/MPEG use their native decoder's actual BT.601-TV conversion and original decoded
 storage dimensions. Mapped MP4 subtitles reject unavailable color metadata rather than
 guessing from resolution. Unmapped media retain their existing playback behavior.

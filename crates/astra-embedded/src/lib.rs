@@ -2,8 +2,6 @@
 mod config;
 mod input;
 mod platform;
-#[cfg(windows)]
-mod d3d12;
 
 use astra_emu_abi::*;
 use rfvp::app::embedded::session::Platform;
@@ -44,12 +42,11 @@ unsafe fn handle<'a>(session: Session) -> anyhow::Result<&'a Handle> {
     Ok(unsafe { &*session.cast::<Handle>() })
 }
 fn surface(native: &NativeSession) -> SurfaceInfo {
-    SurfaceInfo { kind: if native.gpu_delivery { SURFACE_GPU } else { SURFACE_CPU },
+    SurfaceInfo { kind: SURFACE_CPU,
         pixel_format: PIXEL_RGBA8, color: COLOR_SRGB, alpha: ALPHA_IGNORED, rows: ROWS_TOP_DOWN,
-        backend: if native.gpu_delivery { BACKEND_D3D12 } else { 0 },
         logical: Extent { width: native.logical.0, height: native.logical.1 },
         raster: Extent { width: native.raster.0, height: native.raster.1 },
-        stride: if native.gpu_delivery { 0 } else { native.raster.0 as u64 * 4 } }
+        stride: native.raster.0 as u64 * 4 }
 }
 fn initialized() -> anyhow::Result<()> {
     anyhow::ensure!(INITIALIZED.load(Ordering::Acquire), "ASTRA_EMU_FAMILY_DIAGNOSTIC_INIT");
@@ -94,9 +91,6 @@ unsafe extern "C" fn probe(path: Bytes, output: *mut ProbeResult, error: *mut Er
     })
 }
 unsafe extern "C" fn open(request: *const OpenRequest, output: *mut OpenResult, error: *mut Error) -> Status {
-    unsafe { open_impl(request, std::ptr::null(), output, error) }
-}
-unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, output: *mut OpenResult, error: *mut Error) -> Status {
     if output.is_null() { return failure(error, INVALID_ARGUMENT, "RFVP_OPEN_OUTPUT_INVALID", "missing open output"); }
     unsafe { (*output).session = std::ptr::null_mut(); }
     boundary(error, "RFVP_OPEN_FAILED", || {
@@ -110,26 +104,10 @@ unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, out
         anyhow::ensure!(request.host.cancellation.is_cancelled.is_some(), "RFVP_CANCELLATION_SERVICE_REQUIRED");
         anyhow::ensure!(request.window.focused <= 1 && request.window.suspended <= 1
             && request.window.scale_factor.is_finite() && request.window.scale_factor > 0.0, "RFVP_WINDOW_STATE_INVALID");
+        if config::RENDER.validate_request(config::CAPABILITIES, request.render_extent).is_err() {
+            return Ok(failure(error, INVALID_ARGUMENT, "RFVP_RENDER_EXTENT_INVALID", "render extent is outside the declared range"));
+        }
         let config = unsafe { config::parse(request)? };
-        let delivery = match config.surface.as_str() {
-            "cpu" => rfvp::app::embedded::Delivery::Cpu,
-            #[cfg(windows)]
-            "cpu_d3d12" => rfvp::app::embedded::Delivery::CpuD3D12,
-            #[cfg(windows)]
-            "d3d12" => {
-                let Some(host) = (unsafe { gpu_host.as_ref() }) else {
-                    return Ok(failure(error, UNSUPPORTED, "RFVP_D3D12_HOST_REQUIRED", "D3D12 delivery requires a compatible Host device"));
-                };
-                if host.validate().is_err() {
-                    return Ok(failure(error, UNSUPPORTED, "RFVP_D3D12_HOST_VERSION", "incompatible D3D12 Host descriptor"));
-                }
-                rfvp::app::embedded::Delivery::D3D12(rfvp::app::embedded::d3d12::Host {
-                    adapter_luid: host.adapter_luid, max_width: host.max_width, max_height: host.max_height,
-                    dxgi_format: host.dxgi_format, copy_usage: host.copy_usage,
-                })
-            }
-            _ => return Ok(failure(error, UNSUPPORTED, "RFVP_SURFACE_UNSUPPORTED", "unsupported frame delivery")),
-        };
         let path = unsafe { request.game_path.text(32768) }.map_err(|_| anyhow::anyhow!("RFVP_GAME_PATH_INVALID"))?;
         let path = Path::new(path);
         let root = if path.is_file() { path.parent().ok_or_else(|| anyhow::anyhow!("RFVP_GAME_ROOT_INVALID"))? } else { path };
@@ -139,7 +117,8 @@ unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, out
         let active = Active;
         let platform = Arc::new(platform::HostWindow { service: request.host.window, cancellation: request.host.cancellation,
             session_epoch: request.session_epoch, next_request: AtomicU64::new(1) });
-        let native = match NativeSession::open_with_delivery(root, config.nls, config.render_scale, config.translation_table, config.subtitle_map, platform.clone(), request.window.suspended != 0, delivery) {
+        let native = match NativeSession::open(root, config.nls, (request.render_extent.width, request.render_extent.height),
+            config.translation_table, config.subtitle_map, platform.clone(), request.window.suspended != 0) {
             Ok(native) => native,
             Err(_) if platform.is_cancelled() =>
                 return Ok(failure(error, CANCELLED, "RFVP_SESSION_CANCELLED", "native initialization cancelled")),
@@ -212,9 +191,6 @@ unsafe extern "C" fn release(owner: *mut c_void) {
 unsafe extern "C" fn frame(session: Session, known: FrameIdentity, output: *mut FrameSurface, error: *mut Error) -> Status {
     boundary(error, "RFVP_FRAME_FAILED", || {
         let handle = unsafe { handle(session)? };
-        if handle.native.gpu_delivery {
-            return Ok(failure(error, UNSUPPORTED, "RFVP_GPU_ACQUIRE_REQUIRED", "GPU sessions require the negotiated D3D12 acquire function"));
-        }
         let output = unsafe { output.as_mut() }.ok_or_else(|| anyhow::anyhow!("missing frame output"))?;
         let snapshot = handle.native.snapshot();
         let identity = FrameIdentity { session_epoch: handle.epoch, output_epoch: 1,
@@ -248,14 +224,9 @@ unsafe extern "C" fn close(session: Session, error: *mut Error) -> Status {
         Ok(OK)
     })
 }
-unsafe extern "C" fn extension(name: Bytes, version: u32, output: *mut *const c_void) -> Status {
+unsafe extern "C" fn extension(_name: Bytes, _version: u32, output: *mut *const c_void) -> Status {
     if output.is_null() { return INVALID_ARGUMENT; }
     unsafe { *output = std::ptr::null(); }
-    #[cfg(windows)]
-    if version == D3D12_EXTENSION_VERSION && unsafe { name.as_slice(128) }.is_ok_and(|name| name == D3D12_EXTENSION) {
-        unsafe { *output = (&d3d12::API as *const D3D12Api).cast(); }
-        return OK;
-    }
     UNSUPPORTED
 }
 

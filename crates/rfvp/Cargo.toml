@@ -104,14 +104,10 @@ riff = { version = "2.0.0", optional = true }
 uefi = { version = "0.37.0", default-features = false, features = ["alloc"], optional = true }
 anzu-hal = { path = "../anzu-hal", optional = true }
 
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
-d3d12 = { version = "0.19", optional = true }
-
 [features]
 # Keep native movie support enabled by default for backward compatibility.
 default = ["runtime-core-deps", "gpu-render", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging", "mimalloc"]
-embedded = ["dep:parking_lot", "dep:windows", "dep:d3d12", "subtitles"]
+embedded = ["dep:parking_lot", "subtitles"]
 subtitles = ["runtime-core-deps", "gpu-render", "dep:astra-subtitle"]
 
 # mimalloc as the global allocator (desktop and mobile; never with `no_std`).

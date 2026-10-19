@@ -4867,7 +4867,6 @@ dependencies = [
  "core_maths",
  "cpal",
  "crossbeam-channel",
- "d3d12",
  "egui 0.27.2",
  "egui-wgpu 0.27.2",
  "encoding_rs",
@@ -4922,7 +4921,6 @@ dependencies = [
  "web-sys",
  "web-time 1.1.0",
  "wgpu 0.19.4",
- "windows 0.62.2",
  "winit 0.30.13",
  "wmv-decoder",
 ]

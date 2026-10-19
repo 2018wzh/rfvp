@@ -5,37 +5,33 @@ use crate::subsystem::anzu_scene::AnzuScene;
 use std::sync::atomic::AtomicBool;
 
 pub mod session;
-#[cfg(windows)]
-pub mod d3d12;
-
-#[derive(Clone, Copy, Default)]
-pub enum Delivery {
-    #[default]
-    Cpu,
-    #[cfg(windows)]
-    CpuD3D12,
-    #[cfg(windows)]
-    D3D12(d3d12::Host),
-}
 
 pub struct EmbeddedApp {
     app: Box<App>,
     readback: Option<RenderTargetReadback>,
     paused_at: Option<Instant>,
     closed: bool,
-    #[cfg(windows)]
-    export: Option<d3d12::ExportPool>,
+}
+
+/// Maps a requested raster extent to a uniform scale of the logical size.
+/// 0x0 keeps the native 1:1 raster.
+pub fn render_scale(logical: (u32, u32), requested: (u32, u32)) -> f64 {
+    if requested == (0, 0) { return 1.0; }
+    (requested.0 as f64 / logical.0 as f64).min(requested.1 as f64 / logical.1 as f64).clamp(0.25, 4.0)
+}
+
+pub fn raster_size(logical: (u32, u32), requested: (u32, u32)) -> Result<(u32, u32)> {
+    let scale = render_scale(logical, requested);
+    let raster = ((logical.0 as f64 * scale).round() as u32, (logical.1 as f64 * scale).round() as u32);
+    anyhow::ensure!(raster.0 > 0 && raster.1 > 0 && raster.0 <= 8192 && raster.1 <= 8192,
+        "RFVP_RENDER_SIZE_UNSUPPORTED");
+    Ok(raster)
 }
 
 impl EmbeddedApp {
-    pub fn open(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, subtitle_map: &str, cancellation: Arc<AtomicBool>) -> Result<Self> {
-        Self::open_with_delivery(game_root, nls, render_scale, translation_table, subtitle_map, cancellation, Delivery::Cpu)
-    }
-
-    pub fn open_with_delivery(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, subtitle_map: &str,
-        cancellation: Arc<AtomicBool>, delivery: Delivery) -> Result<Self> {
+    pub fn open(game_root: &str, nls: Nls, render_extent: (u32, u32), translation_table: &str, subtitle_map: &str,
+        cancellation: Arc<AtomicBool>) -> Result<Self> {
         anyhow::ensure!(!cancellation.load(std::sync::atomic::Ordering::Acquire), "RFVP_SESSION_CANCELLED");
-        anyhow::ensure!(render_scale.is_finite() && (0.25..=4.0).contains(&render_scale), "RFVP_RENDER_SCALE_INVALID");
         crate::utils::file::set_base_path(game_root);
         let mut parser = crate::boot::load_script(nls)?;
         if !translation_table.is_empty() {
@@ -58,10 +54,7 @@ impl EmbeddedApp {
         let title = parser.get_title();
         let logical = parser.get_screen_size();
         anyhow::ensure!(logical.0 != 0 && logical.1 != 0, "RFVP_LOGICAL_SIZE_INVALID");
-        let raster = ((logical.0 as f64 * render_scale).round() as u32,
-            (logical.1 as f64 * render_scale).round() as u32);
-        anyhow::ensure!(raster.0 > 0 && raster.1 > 0 && raster.0 <= 8192 && raster.1 <= 8192,
-            "RFVP_RENDER_SIZE_UNSUPPORTED");
+        let raster = raster_size(logical, render_extent)?;
         #[cfg(feature = "subtitles")]
         let subtitles = if subtitle_map.is_empty() { None } else {
             Some(crate::subtitles::Subtitles::load(game_root, subtitle_map)?)
@@ -78,18 +71,10 @@ impl EmbeddedApp {
             .with_text_hidpi_enabled(true)
             .with_vfs(nls)?;
         #[allow(unused_mut)]
-        let mut app = builder.build_embedded(raster, cancellation, delivery)?;
+        let mut app = builder.build_embedded(raster, cancellation)?;
         #[cfg(feature = "subtitles")]
         { app.subtitles = subtitles; }
-        #[cfg(windows)]
-        let export = match delivery {
-            Delivery::D3D12(host) => Some(d3d12::ExportPool::new(&app.resources.device, host, raster.0, raster.1)?),
-            _ => None,
-        };
-        Ok(Self { app, readback: None, paused_at: None, closed: false,
-            #[cfg(windows)]
-            export,
-        })
+        Ok(Self { app, readback: None, paused_at: None, closed: false })
     }
 
     pub fn logical_size(&self) -> (u32, u32) { self.app.virtual_size }
@@ -190,13 +175,6 @@ impl EmbeddedApp {
         if let Some(readback) = self.readback.as_mut() { readback.cancel_mapping(); }
     }
 
-    #[cfg(windows)]
-    pub fn publish_gpu(&mut self, generation: u64, timestamp_ns: u64) -> Result<Option<Arc<session::Frame>>> {
-        let PresentationTarget::Embedded(target) = &self.app.surface else { unreachable!() };
-        self.export.as_mut().context("RFVP_GPU_EXPORT_NOT_CONFIGURED")?
-            .publish(&self.app.resources.device, &self.app.resources.queue, target.texture(), generation, timestamp_ns)
-    }
-
     pub fn shutdown(&mut self) -> Result<()> {
         if self.closed { return Ok(()); }
         self.closed = true;
@@ -207,10 +185,6 @@ impl EmbeddedApp {
         gd.video_manager.stop(&mut gd.motion_manager);
         let audio_result = gd.audio_manager.backend().shutdown();
         let save_result = crate::subsystem::global_savedata::save_global_savedata_v1(gd);
-        #[cfg(windows)]
-        let export_result = self.export.as_ref().map_or(Ok(()), d3d12::ExportPool::drain);
-        #[cfg(windows)]
-        export_result?;
         audio_result?;
         save_result?;
         Ok(())
@@ -226,34 +200,14 @@ impl Drop for EmbeddedApp {
 }
 
 impl AppBuilder {
-    fn build_embedded(mut self, raster: (u32, u32), cancellation: Arc<AtomicBool>, delivery: Delivery) -> Result<Box<App>> {
+    fn build_embedded(mut self, raster: (u32, u32), cancellation: Arc<AtomicBool>) -> Result<Box<App>> {
         anyhow::ensure!(!cancellation.load(std::sync::atomic::Ordering::Acquire), "RFVP_SESSION_CANCELLED");
-        let descriptor = wgpu::InstanceDescriptor::default();
-        #[cfg(windows)]
-        let descriptor = if matches!(delivery, Delivery::D3D12(_) | Delivery::CpuD3D12) {
-            wgpu::InstanceDescriptor { backends: wgpu::Backends::DX12, ..descriptor }
-        } else { descriptor };
-        let instance = wgpu::Instance::new(descriptor);
-        #[cfg(windows)]
-        let selected = if let Delivery::D3D12(host) = delivery {
-            Some(instance.enumerate_adapters(wgpu::Backends::DX12).into_iter().find(|adapter| unsafe {
-                adapter.as_hal::<wgpu::hal::api::Dx12, _, _>(|hal| hal.is_some_and(|hal| {
-                    let mut desc = std::mem::zeroed();
-                    let result = hal.raw_adapter().GetDesc1(&mut desc);
-                    result >= 0 && ((desc.AdapterLuid.HighPart as u32 as u64) << 32 | desc.AdapterLuid.LowPart as u64) == host.adapter_luid
-                }))
-            }).context("RFVP_D3D12_ADAPTER_MISMATCH")?)
-        } else { None };
-        #[cfg(not(windows))]
-        let selected: Option<wgpu::Adapter> = None;
-        let adapter = match selected {
-            Some(adapter) => adapter,
-            None => futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })).context("RFVP_GPU_ADAPTER_UNAVAILABLE")?,
-        };
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let adapter = futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })).context("RFVP_GPU_ADAPTER_UNAVAILABLE")?;
         let adapter_info = adapter.get_info();
         anyhow::ensure!(adapter_info.device_type != wgpu::DeviceType::Cpu, "RFVP_HARDWARE_GPU_REQUIRED");
         log::info!(target: "rfvp::embedded", "Native GPU {:?}; logical {:?}; raster {:?}", adapter_info, self.size, raster);
