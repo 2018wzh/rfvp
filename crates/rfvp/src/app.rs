@@ -201,6 +201,8 @@ pub struct App {
     last_dissolve2_transitioning: bool,
     legacy_save_load_ui: LegacySaveLoadUi,
     exit_confirm_ui: ExitConfirmUi,
+    #[cfg(feature = "subtitles")]
+    subtitles: Option<crate::subtitles::Subtitles>,
     builtin_exit_ui_enabled: bool,
     pending_app_exit: bool,
 }
@@ -918,6 +920,25 @@ impl App {
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         self.sync_render_target_backing();
+        #[cfg(feature = "subtitles")]
+        if let Some(subtitles) = self.subtitles.as_mut() {
+            use crate::subtitles::{Clock, Media};
+            use crate::subsystem::resources::videoplayer::MovieColor;
+            use astra_subtitle::VideoColorSpace;
+            let gd = gd_read(&self.game_data);
+            let bgm: [Option<Media<'_>>; 4] = std::array::from_fn(|slot| {
+                gd.bgm_player_ref().playback(slot).map(|(resource, serial, position_ms)| Media {
+                    clock: Clock::Bgm, resource, serial, position_ms, storage: self.virtual_size,
+                    color: Some(VideoColorSpace::Rgb),
+                })
+            });
+            let movie = gd.video_manager.playback().map(|(resource, serial, position, presentation)| Media {
+                clock: Clock::Movie, resource, serial, position_ms: Some(position), storage: presentation.storage,
+                color: match presentation.color { MovieColor::Bt601Tv => Some(VideoColorSpace::Bt601Tv), MovieColor::Unknown => None },
+            });
+            subtitles.update(bgm.into_iter().flatten().chain(movie), self.vm_worker.timeline_epoch(),
+                self.virtual_size, self.render_target.backing_size(), &self.resources)?;
+        }
 
         // Commit a pending SaveWrite using a prepared in-memory payload (local_saved),
         // without capturing the current frame. This matches the original engine's
@@ -1121,6 +1142,11 @@ impl App {
                     .pipelines
                     .fill
                     .draw(&mut pass, mk_fill_src(), proj, color);
+            }
+
+            #[cfg(feature = "subtitles")]
+            if let Some(subtitles) = &self.subtitles {
+                subtitles.draw(&mut pass, &self.resources.pipelines.sprite, proj);
             }
 
             self.prim_renderer.draw_virtual_overlay(
@@ -2925,6 +2951,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3111,6 +3139,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3323,6 +3353,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3519,6 +3551,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 

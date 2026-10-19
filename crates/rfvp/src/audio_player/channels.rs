@@ -46,12 +46,16 @@ pub struct Channels<const N: usize> {
     /// The slot was unloaded by the script; `names` still holds the source so a later play can
     /// load it again on demand.
     released: [bool; N],
-    names: [Option<String>; N],
+    names: [Option<Arc<str>>; N],
     kinds: [Option<i32>; N],
     type_volumes: [f32; SOUND_TYPE_COUNT],
     volumes: [f32; N],
     repeat: [bool; N],
     pan: [f64; N],
+    #[cfg(feature = "subtitles")]
+    playback_serials: [u64; N],
+    #[cfg(feature = "subtitles")]
+    playing_names: [Option<Arc<str>>; N],
 }
 
 impl<const N: usize> Channels<N> {
@@ -72,7 +76,18 @@ impl<const N: usize> Channels<N> {
             volumes: [1.0; N],
             repeat: [false; N],
             pan: [0.5; N],
+            #[cfg(feature = "subtitles")]
+            playback_serials: [0; N],
+            #[cfg(feature = "subtitles")]
+            playing_names: [(); N].map(|_| None),
         }
+    }
+
+    #[cfg(feature = "subtitles")]
+    pub fn playback(&self, slot: usize) -> Option<(&str, u64, Option<u64>)> {
+        if slot >= N || !self.is_playing(slot as i32) { return None; }
+        Some((self.playing_names[slot].as_deref()?, self.playback_serials[slot],
+            self.audio.backend().position_ms(self.id(slot))))
     }
 
     fn slot(&self, slot: i32) -> Result<usize> {
@@ -111,7 +126,7 @@ impl<const N: usize> Channels<N> {
     fn load_source(&mut self, slot: i32, source: SoundSource, vfs: &Vfs) -> Result<()> {
         let slot = self.slot(slot)?;
         self.audio.backend().load(self.id(slot), &source, vfs)?;
-        self.names[slot] = source.name().map(String::from);
+        self.names[slot] = source.name().map(Arc::from);
         self.sources[slot] = Some(source);
         self.released[slot] = false;
         Ok(())
@@ -178,7 +193,13 @@ impl<const N: usize> Channels<N> {
         log::info!("Playing {} slot {slot}", self.label);
         self.audio
             .backend()
-            .play(self.id(slot), self.params(slot), fade_in, vfs)
+            .play(self.id(slot), self.params(slot), fade_in, vfs)?;
+        #[cfg(feature = "subtitles")]
+        {
+            self.playback_serials[slot] = crate::rfvp_audio::next_playback_serial();
+            self.playing_names[slot] = self.names[slot].clone();
+        }
+        Ok(())
     }
 
     pub fn set_volume(&mut self, slot: i32, volume: f32, tween: Tween) {
@@ -246,7 +267,7 @@ impl<const N: usize> Channels<N> {
                 (playing || data_loaded || self.names[slot].is_some() || self.kinds[slot].is_some())
                     .then(|| SlotInfo {
                         slot,
-                        name: self.names[slot].clone(),
+                        name: self.names[slot].as_deref().map(String::from),
                         volume: self.volumes[slot] as f64,
                         muted: false,
                         kind: self.kinds[slot],
@@ -264,7 +285,7 @@ impl<const N: usize> Channels<N> {
             })
             .map(|slot| SlotState {
                 slot,
-                path: self.names[slot].clone(),
+                path: self.names[slot].as_deref().map(String::from),
                 sound_type: self.kinds[slot],
                 volume: self.volumes[slot],
                 muted: false,

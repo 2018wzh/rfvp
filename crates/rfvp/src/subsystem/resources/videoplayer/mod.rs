@@ -61,6 +61,19 @@ pub struct MovieFrame {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    #[cfg(feature = "subtitles")]
+    pub presentation: Presentation,
+}
+
+#[cfg(feature = "subtitles")]
+#[derive(Clone, Copy, Debug)]
+pub enum MovieColor { Bt601Tv, Unknown }
+
+#[cfg(feature = "subtitles")]
+#[derive(Clone, Copy, Debug)]
+pub struct Presentation {
+    pub storage: (u32, u32),
+    pub color: MovieColor,
 }
 
 /// A movie being decoded.
@@ -73,6 +86,10 @@ pub trait MovieSource: Send + Sync {
     fn resume_after(&mut self, elapsed: crate::platform_time::Duration);
 
     fn is_finished(&mut self) -> Result<bool>;
+
+    /// The decoder's existing presentation clock, including its PTS origin.
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self) -> Option<u64>;
 
     /// Stop decoding and the soundtrack.
     fn stop(self: Box<Self>);
@@ -124,6 +141,12 @@ pub struct VideoPlayerManager {
     playing: bool,
     modal: bool,
     source: Option<Box<dyn MovieSource>>,
+    #[cfg(feature = "subtitles")]
+    resource: alloc::string::String,
+    #[cfg(feature = "subtitles")]
+    serial: u64,
+    #[cfg(feature = "subtitles")]
+    presentation: Option<Presentation>,
 }
 
 impl core::fmt::Debug for VideoPlayerManager {
@@ -139,6 +162,12 @@ impl core::fmt::Debug for VideoPlayerManager {
 impl VideoPlayerManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(feature = "subtitles")]
+    pub fn playback(&self) -> Option<(&str, u64, u64, Presentation)> {
+        if !self.playing { return None; }
+        Some((&self.resource, self.serial, self.source.as_ref()?.position_ms()?, self.presentation?))
     }
 
     pub fn is_playing(&self) -> bool {
@@ -173,6 +202,12 @@ impl VideoPlayerManager {
         self.playing = true;
         self.modal = matches!(request.mode, MovieMode::ModalWithAudio);
         self.source = Some(source);
+        #[cfg(feature = "subtitles")]
+        {
+            self.resource = alloc::string::String::from(request.name);
+            self.serial = crate::rfvp_audio::next_playback_serial();
+            self.presentation = None;
+        }
         self.ensure_layer(motion, request.screen_w as i16, request.screen_h as i16);
 
         // Prime the first frame.
@@ -192,6 +227,8 @@ impl VideoPlayerManager {
         };
 
         if let Some(frame) = source.next_frame()? {
+            #[cfg(feature = "subtitles")]
+            { self.presentation = Some(frame.presentation); }
             motion.load_texture_from_buff(MOVIE_GRAPH_ID, frame.rgba, frame.width, frame.height)?;
             motion.refresh_prims(MOVIE_GRAPH_ID);
         }
@@ -204,6 +241,8 @@ impl VideoPlayerManager {
     pub fn stop(&mut self, motion: &mut MotionManager) {
         self.playing = false;
         self.modal = false;
+        #[cfg(feature = "subtitles")]
+        { self.presentation = None; }
 
         // Hide and unlink the movie layer primitives.
         // Keep the GraphBuff intact; it can be overwritten on next start.

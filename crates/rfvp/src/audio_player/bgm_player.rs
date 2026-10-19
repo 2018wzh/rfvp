@@ -54,6 +54,11 @@ impl BgmPlayer {
         }
     }
 
+    #[cfg(feature = "subtitles")]
+    pub fn playback(&self, slot: usize) -> Option<(&str, u64, Option<u64>)> {
+        self.channels.playback(slot)
+    }
+
     /// Load an encoded song handed over as bytes.
     pub fn load(&mut self, slot: i32, bgm: Vec<u8>) -> Result<()> {
         // Bytes need no game files.

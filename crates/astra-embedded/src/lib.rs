@@ -139,7 +139,7 @@ unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, out
         let active = Active;
         let platform = Arc::new(platform::HostWindow { service: request.host.window, cancellation: request.host.cancellation,
             session_epoch: request.session_epoch, next_request: AtomicU64::new(1) });
-        let native = match NativeSession::open_with_delivery(root, config.nls, config.render_scale, config.translation_table, platform.clone(), request.window.suspended != 0, delivery) {
+        let native = match NativeSession::open_with_delivery(root, config.nls, config.render_scale, config.translation_table, config.subtitle_map, platform.clone(), request.window.suspended != 0, delivery) {
             Ok(native) => native,
             Err(_) if platform.is_cancelled() =>
                 return Ok(failure(error, CANCELLED, "RFVP_SESSION_CANCELLED", "native initialization cancelled")),

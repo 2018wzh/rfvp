@@ -1086,6 +1086,8 @@ pub mod exit_confirm_ui;
 pub mod font;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 pub mod legacy_save_load_ui;
+#[cfg(feature = "subtitles")]
+mod subtitles;
 pub(crate) mod platform_random;
 pub(crate) mod platform_time;
 pub mod rendering;

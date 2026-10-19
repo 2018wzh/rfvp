@@ -3,7 +3,7 @@ use alloc::{string::String, vec::Vec};
 use anyhow::{ensure, Result};
 use super::parser::Parser;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TranslationTable {
     pub source_hcb_sha256: [u8; 32],
     records: Vec<(u32, String)>,

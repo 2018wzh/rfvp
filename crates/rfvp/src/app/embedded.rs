@@ -28,11 +28,11 @@ pub struct EmbeddedApp {
 }
 
 impl EmbeddedApp {
-    pub fn open(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, cancellation: Arc<AtomicBool>) -> Result<Self> {
-        Self::open_with_delivery(game_root, nls, render_scale, translation_table, cancellation, Delivery::Cpu)
+    pub fn open(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, subtitle_map: &str, cancellation: Arc<AtomicBool>) -> Result<Self> {
+        Self::open_with_delivery(game_root, nls, render_scale, translation_table, subtitle_map, cancellation, Delivery::Cpu)
     }
 
-    pub fn open_with_delivery(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str,
+    pub fn open_with_delivery(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, subtitle_map: &str,
         cancellation: Arc<AtomicBool>, delivery: Delivery) -> Result<Self> {
         anyhow::ensure!(!cancellation.load(std::sync::atomic::Ordering::Acquire), "RFVP_SESSION_CANCELLED");
         anyhow::ensure!(render_scale.is_finite() && (0.25..=4.0).contains(&render_scale), "RFVP_RENDER_SCALE_INVALID");
@@ -62,6 +62,12 @@ impl EmbeddedApp {
             (logical.1 as f64 * render_scale).round() as u32);
         anyhow::ensure!(raster.0 > 0 && raster.1 > 0 && raster.0 <= 8192 && raster.1 <= 8192,
             "RFVP_RENDER_SIZE_UNSUPPORTED");
+        #[cfg(feature = "subtitles")]
+        let subtitles = if subtitle_map.is_empty() { None } else {
+            Some(crate::subtitles::Subtitles::load(game_root, subtitle_map)?)
+        };
+        #[cfg(not(feature = "subtitles"))]
+        anyhow::ensure!(subtitle_map.is_empty(), "RFVP_SUBTITLE_SUPPORT_NOT_COMPILED");
         // The embedding application owns logging. Do not initialize the desktop logger here.
         let builder = AppBuilder::new_boxed(crate::boot::app_config(&title, logical))
             .with_scene::<AnzuScene>()
@@ -71,7 +77,10 @@ impl EmbeddedApp {
             .with_parser(parser)
             .with_text_hidpi_enabled(true)
             .with_vfs(nls)?;
-        let app = builder.build_embedded(raster, cancellation, delivery)?;
+        #[allow(unused_mut)]
+        let mut app = builder.build_embedded(raster, cancellation, delivery)?;
+        #[cfg(feature = "subtitles")]
+        { app.subtitles = subtitles; }
         #[cfg(windows)]
         let export = match delivery {
             Delivery::D3D12(host) => Some(d3d12::ExportPool::new(&app.resources.device, host, raster.0, raster.1)?),

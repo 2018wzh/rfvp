@@ -101,6 +101,9 @@ pub struct Parser {
     game_title: String,
     pub syscall_count: u16,
     pub syscalls: SyscallMap,
+    #[cfg(not(feature = "old_school"))]
+    translation_table: Option<Arc<super::translation::TranslationTable>>,
+    #[cfg(feature = "old_school")]
     translation_table: Option<super::translation::TranslationTable>,
 }
 
@@ -136,7 +139,11 @@ impl Parser {
                 offset += len;
             }
         }
-        self.translation_table = Some(super::translation::TranslationTable::parse(bytes, self, &hash.finalize())?);
+        let table = super::translation::TranslationTable::parse(bytes, self, &hash.finalize())?;
+        #[cfg(not(feature = "old_school"))]
+        { self.translation_table = Some(Arc::new(table)); }
+        #[cfg(feature = "old_school")]
+        { self.translation_table = Some(table); }
         Ok(())
     }
 

@@ -59,6 +59,25 @@ strings keep the configured script encoding. Tables with duplicate offsets, inva
 embedded NULs, truncated records, or trailing data are rejected. The table stores both the source
 and final HCB hashes; only the final hash identifies the script loaded by the engine.
 
+Embedded builds enable the native `subtitles` feature. `subtitle_map` is an optional
+game-root-relative JSON path (4096-byte maximum):
+```json
+{"version":1,"tracks":[{"clock":"movie","resource":"movie/public.wmv","ass":"subtitle/public.ass","fonts":["subtitle/fonts/public.ttf"]}]}
+```
+Clocks are `movie` or `bgm`; resource matching follows the native ASCII-case-insensitive
+paths. ASS and explicit fonts are loaded read-only once. Movie timestamps come from
+the decoder's existing PTS clock; BGM timestamps come from the audio device handle.
+The latest mapped playback start owns the track. Stop/end removes it, restart replaces
+it, and a restored VM timeline invalidates the old renderer. Pausing adds no subtitle
+clock. Rendering uses the shared libass component, updates only changed subtitle masks,
+and draws through the existing sprite pipeline before the custom/system-page overlay,
+for both CPU frame delivery and D3D12 exports. No game frame is copied for compositing.
+WMV/MPEG use their native decoder's actual BT.601-TV conversion and original decoded
+storage dimensions. Mapped MP4 subtitles reject unavailable color metadata rather than
+guessing from resolution. Unmapped media retain their existing playback behavior.
+Text fonts continue to use the existing `font/` directory and CJK fallback selection;
+ASS font selection comes only from each track's explicit `fonts` list.
+
 ### HOW TO BUILD
 * macOS Bundle: [setsumei/HOW-TO-BUILD.macos-bundle.md](setsumei/HOW-TO-BUILD.macos-bundle.md)
 * iOS IPA: [setsumei/HOW-TO-BUILD.ios.md](setsumei/HOW-TO-BUILD.ios.md)

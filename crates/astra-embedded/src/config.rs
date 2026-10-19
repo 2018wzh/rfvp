@@ -11,7 +11,7 @@ static FORMATS: StaticBytes<1> = StaticBytes([text(b"fvp.hcb")]);
 static SURFACES: StaticBytes<3> = StaticBytes([text(b"cpu"), text(b"d3d12"), text(b"cpu_d3d12")]);
 #[cfg(not(windows))]
 static SURFACES: StaticBytes<1> = StaticBytes([text(b"cpu")]);
-struct Schema([ConfigField; 4]);
+struct Schema([ConfigField; 5]);
 // Schema pointers reference only immutable static storage above.
 unsafe impl Sync for Schema {}
 static SCHEMA: Schema = Schema([
@@ -39,6 +39,12 @@ static SCHEMA: Schema = Schema([
         integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
         max_bytes: 4096, reserved: 0, choices: std::ptr::null(), choice_count: 0,
     },
+    ConfigField {
+        id: text(b"subtitle_map"), label: text(b"Media subtitles"), group: text(b"Script"),
+        default_value: ConfigValue { kind: VALUE_STRING, reserved: 0, integer: 0, number: 0.0, text: Bytes::EMPTY },
+        integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
+        max_bytes: 4096, reserved: 0, choices: std::ptr::null(), choice_count: 0,
+    },
 ]);
 
 pub fn descriptor() -> Descriptor {
@@ -54,6 +60,7 @@ pub struct EmbeddedConfig {
     pub render_scale: f64,
     pub surface: String,
     pub translation_table: String,
+    pub subtitle_map: String,
 }
 
 pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<EmbeddedConfig> {
@@ -65,6 +72,7 @@ pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<EmbeddedConfig> {
     let mut scale = 1.0;
     let mut surface = "cpu".to_owned();
     let mut translation_table = String::new();
+    let mut subtitle_map = String::new();
     for entry in values {
         match unsafe { entry.id.text(128) }.map_err(|_| anyhow::anyhow!("RFVP_CONFIG_ID_INVALID"))? {
             "render_scale" => scale = entry.value.number,
@@ -74,10 +82,12 @@ pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<EmbeddedConfig> {
                 .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_SURFACE_INVALID"))?.to_owned(),
             "translation_table" => translation_table = unsafe { entry.value.text.text(4096) }
                 .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_TRANSLATION_INVALID"))?.to_owned(),
+            "subtitle_map" => subtitle_map = unsafe { entry.value.text.text(4096) }
+                .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_SUBTITLE_INVALID"))?.to_owned(),
             _ => unreachable!("validated configuration key"),
         }
     }
-    Ok(EmbeddedConfig { nls, render_scale: scale, surface, translation_table })
+    Ok(EmbeddedConfig { nls, render_scale: scale, surface, translation_table, subtitle_map })
 }
 
 #[cfg(test)]

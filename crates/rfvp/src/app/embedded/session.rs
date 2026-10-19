@@ -58,11 +58,11 @@ pub struct NativeSession {
 }
 
 impl NativeSession {
-    pub fn open(root: String, nls: Nls, scale: f64, translation_table: String, platform: Arc<dyn Platform>, initially_suspended: bool) -> Result<Self> {
-        Self::open_with_delivery(root, nls, scale, translation_table, platform, initially_suspended, Delivery::Cpu)
+    pub fn open(root: String, nls: Nls, scale: f64, translation_table: String, subtitle_map: String, platform: Arc<dyn Platform>, initially_suspended: bool) -> Result<Self> {
+        Self::open_with_delivery(root, nls, scale, translation_table, subtitle_map, platform, initially_suspended, Delivery::Cpu)
     }
 
-    pub fn open_with_delivery(root: String, nls: Nls, scale: f64, translation_table: String, platform: Arc<dyn Platform>,
+    pub fn open_with_delivery(root: String, nls: Nls, scale: f64, translation_table: String, subtitle_map: String, platform: Arc<dyn Platform>,
         initially_suspended: bool, delivery: Delivery) -> Result<Self> {
         #[cfg(windows)]
         let gpu_delivery = matches!(delivery, Delivery::D3D12(_));
@@ -80,7 +80,7 @@ impl NativeSession {
         let worker = thread::Builder::new().name("rfvp-embedded".into()).stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                    let mut app = match EmbeddedApp::open_with_delivery(&root, nls, scale, &translation_table, worker_cancel.clone(), delivery) {
+                    let mut app = match EmbeddedApp::open_with_delivery(&root, nls, scale, &translation_table, &subtitle_map, worker_cancel.clone(), delivery) {
                         Ok(app) => app,
                         Err(error) => {
                             let _ = startup_tx.send(Err(format!("{error:#}")));

@@ -257,6 +257,14 @@ impl AudioBackend for KiraBackend {
             .is_some_and(|handle| handle.state().is_advancing())
     }
 
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self, id: AudioStreamId) -> Option<u64> {
+        let channels = self.channels();
+        let handle = channels.get(&id.0)?.handle.as_ref()?;
+        let seconds = handle.position();
+        (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1000.0) as u64)
+    }
+
     fn set_master_volume(&self, volume: f32) {
         self.manager
             .lock()

@@ -90,6 +90,13 @@ impl SoundSource {
     }
 }
 
+#[cfg(feature = "subtitles")]
+pub(crate) fn next_playback_serial() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(1);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A platform's audio output, addressed by stream id (one per BGM or SE slot).
 pub trait AudioBackend: Send + Sync {
     /// Get `id` ready to play `source`. Fails if the sound cannot be read or decoded.
@@ -108,6 +115,10 @@ pub trait AudioBackend: Send + Sync {
     fn stop(&self, id: AudioStreamId, fade_out: Tween);
 
     fn is_playing(&self, id: AudioStreamId) -> bool;
+
+    /// Actual device playback position. Backends without a device clock report no position.
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self, _id: AudioStreamId) -> Option<u64> { None }
 
     fn set_master_volume(&self, volume: f32);
 
