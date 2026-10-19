@@ -323,6 +323,8 @@ impl AppBuilder {
             last_dt_ms: 0.0, hud_cursor_pos: None, hud_pointer_down: false, hud_scroll_delta_y: 0.0,
             last_dissolve_type: DissolveType::None, last_dissolve2_transitioning: false,
             legacy_save_load_ui, exit_confirm_ui, builtin_exit_ui_enabled, pending_app_exit: false,
+            #[cfg(feature = "subtitles")]
+            subtitles: None,
         });
         app.setup();
         Ok(app)
