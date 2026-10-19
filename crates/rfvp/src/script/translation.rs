@@ -179,3 +179,72 @@ mod final_identity_tests {
         assert!(unpatched.set_translation_table(&table).is_err());
     }
 }
+
+#[cfg(test)]
+mod warning_opcode_tests {
+    use alloc::{string::String, vec, vec::Vec};
+    use crate::script::{context::Context, parser::{Nls, Parser, Syscall}, Variant, VmSyscall};
+    #[cfg(feature = "hosted")]
+    use crate::script::global::Global;
+
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<(String, Vec<Variant>)>,
+        #[cfg(feature = "hosted")]
+        globals: Global,
+    }
+    impl VmSyscall for Recorder {
+        fn do_syscall(&mut self, name: &str, args: Vec<Variant>) -> anyhow::Result<Variant> {
+            self.events.push((String::from(name), args));
+            Ok(Variant::Nil)
+        }
+        #[cfg(feature = "hosted")]
+        fn with_globals<R>(&mut self, callback: impl FnOnce(&mut Global) -> R) -> R {
+            callback(&mut self.globals)
+        }
+    }
+
+    #[test]
+    fn existing_opcodes_replay_call_wait_exactly_3000_and_return() {
+        let mut original = vec![0; 4];
+        original.extend_from_slice(&[2, 10, 0, 0, 0, 0]);
+        let original_helper = original.len() as u32;
+        original.extend_from_slice(&[1, 0, 0, 3, 0, 0, 4]);
+        let warning_helper = original.len() as u32;
+        original.extend_from_slice(&[1, 4, 0, 3, 1, 0, 4]);
+        let descriptor = original.len() as u32;
+        original[..4].copy_from_slice(&descriptor.to_le_bytes());
+        original.extend_from_slice(&4u32.to_le_bytes());
+        original.extend_from_slice(&[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        let tail = original.len() as u32;
+        let mut patched = original.clone();
+        patched[4] = 6;
+        patched[5..9].copy_from_slice(&tail.to_le_bytes());
+        patched.push(2);
+        patched.extend_from_slice(&original_helper.to_le_bytes());
+        patched.extend_from_slice(&[11, 250, 0, 14, 8]);
+        patched.extend_from_slice(b"warning\0");
+        patched.extend_from_slice(&[12, 5, 8, 2]);
+        patched.extend_from_slice(&warning_helper.to_le_bytes());
+        patched.extend_from_slice(&[11, 184, 11, 3, 137, 0, 3, 133, 0, 6]);
+        patched.extend_from_slice(&9u32.to_le_bytes());
+        assert_eq!(patched.len() - original.len(), 40);
+        assert_eq!(&patched[..4], &original[..4]);
+        assert_eq!(&patched[9..original.len()], &original[9..]);
+        let mut parser = Parser::from_bytes(patched, Nls::ShiftJIS).unwrap();
+        for (id, args, name) in [(0, 0, "Original"), (1, 0, "Warning"), (137, 1, "ThreadWait"), (133, 0, "ThreadNext")] {
+            parser.syscalls.insert(id, Syscall { args, name: String::from(name) });
+        }
+        let mut context = Context::new(4, 0);
+        let mut recorder = Recorder::default();
+        for _ in 0..32 {
+            context.dispatch_opcode(&mut recorder, &mut parser).unwrap();
+            if context.get_pc() == 9 { break; }
+        }
+        assert_eq!(context.get_pc(), 9);
+        assert_eq!(recorder.events.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            ["Original", "Warning", "ThreadWait", "ThreadNext"]);
+        assert_eq!(recorder.events[2].1.len(), 1);
+        assert_eq!(recorder.events[2].1[0].as_int(), Some(3000));
+    }
+}
