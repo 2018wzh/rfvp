@@ -51,6 +51,14 @@ If you want to run a translated game, currently we only support UTF-8 and GBK en
 * The translated game encrypts the translated assets.
 * Any other ways that the translated game differs from the original game in terms of data structure and format.
 
+The Astra embedded configuration also accepts `translation_table`, an optional game-root-relative
+path (at most 4096 UTF-8 bytes). The engine loads the read-only `AFVPTR1\0` table once at startup,
+checks the final HCB SHA-256, and validates strictly increasing offsets against actual `PushString`
+payload boundaries. Each matched UTF-8 string retains its original HCB offset identity; unmatched
+strings keep the configured script encoding. Tables with duplicate offsets, invalid UTF-8,
+embedded NULs, truncated records, or trailing data are rejected. The table stores both the source
+and final HCB hashes; only the final hash identifies the script loaded by the engine.
+
 ### HOW TO BUILD
 * macOS Bundle: [setsumei/HOW-TO-BUILD.macos-bundle.md](setsumei/HOW-TO-BUILD.macos-bundle.md)
 * iOS IPA: [setsumei/HOW-TO-BUILD.ios.md](setsumei/HOW-TO-BUILD.ios.md)

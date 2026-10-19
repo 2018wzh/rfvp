@@ -30,6 +30,7 @@ path = "src/bin/sizecheck.rs"
 required-features = ["gpu-render"]
 
 [dependencies]
+sha2 = { version = "0.10", default-features = false }
 anyhow = { version = "1.0.79", default-features = false, optional = true }
 encoding_rs = { version = "0.8.33", optional = true }
 log = { version = "0.4.20", optional = true }

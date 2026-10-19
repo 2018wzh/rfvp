@@ -28,16 +28,32 @@ pub struct EmbeddedApp {
 }
 
 impl EmbeddedApp {
-    pub fn open(game_root: &str, nls: Nls, render_scale: f64, cancellation: Arc<AtomicBool>) -> Result<Self> {
-        Self::open_with_delivery(game_root, nls, render_scale, cancellation, Delivery::Cpu)
+    pub fn open(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str, cancellation: Arc<AtomicBool>) -> Result<Self> {
+        Self::open_with_delivery(game_root, nls, render_scale, translation_table, cancellation, Delivery::Cpu)
     }
 
-    pub fn open_with_delivery(game_root: &str, nls: Nls, render_scale: f64,
+    pub fn open_with_delivery(game_root: &str, nls: Nls, render_scale: f64, translation_table: &str,
         cancellation: Arc<AtomicBool>, delivery: Delivery) -> Result<Self> {
         anyhow::ensure!(!cancellation.load(std::sync::atomic::Ordering::Acquire), "RFVP_SESSION_CANCELLED");
         anyhow::ensure!(render_scale.is_finite() && (0.25..=4.0).contains(&render_scale), "RFVP_RENDER_SCALE_INVALID");
         crate::utils::file::set_base_path(game_root);
-        let parser = crate::boot::load_script(nls.clone())?;
+        let mut parser = crate::boot::load_script(nls)?;
+        if !translation_table.is_empty() {
+            let relative = std::path::Path::new(translation_table);
+            anyhow::ensure!(translation_table.len() <= 4096 && !relative.is_absolute() && !translation_table.contains([':', '\\', '\0'])
+                && relative.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+                "RFVP_TRANSLATION_PATH_INVALID");
+            let root = std::fs::canonicalize(game_root)?;
+            let path = std::fs::canonicalize(root.join(relative))?;
+            anyhow::ensure!(path.starts_with(&root), "RFVP_TRANSLATION_PATH_OUTSIDE_ROOT");
+            let file = std::fs::File::open(path)?;
+            anyhow::ensure!(file.metadata()?.len() <= 64 * 1024 * 1024, "RFVP_TRANSLATION_TOO_LARGE");
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 64 * 1024 * 1024, "RFVP_TRANSLATION_TOO_LARGE");
+            parser.set_translation_table(&bytes)?;
+        }
         anyhow::ensure!(!cancellation.load(std::sync::atomic::Ordering::Acquire), "RFVP_SESSION_CANCELLED");
         let title = parser.get_title();
         let logical = parser.get_screen_size();

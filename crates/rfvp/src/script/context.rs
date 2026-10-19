@@ -644,7 +644,10 @@ impl Context {
         // intended return values and control flow.
         let addr = self.cursor as u32; // points to the first byte of the string payload
 
-        let s = parser.read_cstring(self.cursor, len)?;
+        let s = match parser.translated_string(addr) {
+            Some(text) => alloc::string::String::from(text),
+            None => parser.read_cstring(self.cursor, len)?,
+        };
         self.cursor += len;
 
         // log::info!("push_string: {}", &s);

@@ -11,7 +11,7 @@ static FORMATS: StaticBytes<1> = StaticBytes([text(b"fvp.hcb")]);
 static SURFACES: StaticBytes<3> = StaticBytes([text(b"cpu"), text(b"d3d12"), text(b"cpu_d3d12")]);
 #[cfg(not(windows))]
 static SURFACES: StaticBytes<1> = StaticBytes([text(b"cpu")]);
-struct Schema([ConfigField; 3]);
+struct Schema([ConfigField; 4]);
 // Schema pointers reference only immutable static storage above.
 unsafe impl Sync for Schema {}
 static SCHEMA: Schema = Schema([
@@ -33,6 +33,12 @@ static SCHEMA: Schema = Schema([
         integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
         max_bytes: 0, reserved: 0, choices: SURFACES.0.as_ptr(), choice_count: SURFACES.0.len(),
     },
+    ConfigField {
+        id: text(b"translation_table"), label: text(b"Original-offset translations"), group: text(b"Script"),
+        default_value: ConfigValue { kind: VALUE_STRING, reserved: 0, integer: 0, number: 0.0, text: Bytes::EMPTY },
+        integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
+        max_bytes: 4096, reserved: 0, choices: std::ptr::null(), choice_count: 0,
+    },
 ]);
 
 pub fn descriptor() -> Descriptor {
@@ -43,7 +49,14 @@ pub fn descriptor() -> Descriptor {
         configuration: SCHEMA.0.as_ptr(), configuration_count: SCHEMA.0.len() }
 }
 
-pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<(Nls, f64, String)> {
+pub struct EmbeddedConfig {
+    pub nls: Nls,
+    pub render_scale: f64,
+    pub surface: String,
+    pub translation_table: String,
+}
+
+pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<EmbeddedConfig> {
     let values = unsafe { borrowed_array(request.configuration, request.configuration_count, MAX_CONFIG_FIELDS) }
         .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_STORAGE_INVALID"))?;
     unsafe { validate_config(&SCHEMA.0, values) }
@@ -51,6 +64,7 @@ pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<(Nls, f64, String)>
     let mut nls = Nls::ShiftJIS;
     let mut scale = 1.0;
     let mut surface = "cpu".to_owned();
+    let mut translation_table = String::new();
     for entry in values {
         match unsafe { entry.id.text(128) }.map_err(|_| anyhow::anyhow!("RFVP_CONFIG_ID_INVALID"))? {
             "render_scale" => scale = entry.value.number,
@@ -58,15 +72,36 @@ pub unsafe fn parse(request: &OpenRequest) -> anyhow::Result<(Nls, f64, String)>
                 .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_ENCODING_INVALID"))?.parse()?,
             "surface" => surface = unsafe { entry.value.text.text(128) }
                 .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_SURFACE_INVALID"))?.to_owned(),
+            "translation_table" => translation_table = unsafe { entry.value.text.text(4096) }
+                .map_err(|_| anyhow::anyhow!("RFVP_CONFIG_TRANSLATION_INVALID"))?.to_owned(),
             _ => unreachable!("validated configuration key"),
         }
     }
-    Ok((nls, scale, surface))
+    Ok(EmbeddedConfig { nls, render_scale: scale, surface, translation_table })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_table_is_optional_bounded_string() {
+        let field = &SCHEMA.0[3];
+        assert_eq!(unsafe { field.id.text(128) }.unwrap(), "translation_table");
+        assert_eq!(field.max_bytes, 4096);
+        assert_eq!(unsafe { field.default_value.text.text(4096) }.unwrap(), "");
+        let path = vec![b'a'; 4096];
+        let entry = ConfigEntry { id: text(b"translation_table"), value: ConfigValue {
+            kind: VALUE_STRING, reserved: 0, integer: 0, number: 0.0,
+            text: Bytes { data: path.as_ptr(), len: path.len() },
+        }};
+        unsafe { validate_config(&SCHEMA.0, &[entry]) }.unwrap();
+        let oversized = vec![b'a'; 4097];
+        let invalid = ConfigEntry { value: ConfigValue { text: Bytes {
+            data: oversized.as_ptr(), len: oversized.len(),
+        }, ..entry.value }, ..entry };
+        assert!(unsafe { validate_config(&SCHEMA.0, &[invalid]) }.is_err());
+    }
 
     #[test]
     fn persisted_identity_and_encoding_remain_native() {

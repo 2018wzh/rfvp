@@ -110,8 +110,8 @@ unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, out
         anyhow::ensure!(request.host.cancellation.is_cancelled.is_some(), "RFVP_CANCELLATION_SERVICE_REQUIRED");
         anyhow::ensure!(request.window.focused <= 1 && request.window.suspended <= 1
             && request.window.scale_factor.is_finite() && request.window.scale_factor > 0.0, "RFVP_WINDOW_STATE_INVALID");
-        let (nls, scale, transport) = unsafe { config::parse(request)? };
-        let delivery = match transport.as_str() {
+        let config = unsafe { config::parse(request)? };
+        let delivery = match config.surface.as_str() {
             "cpu" => rfvp::app::embedded::Delivery::Cpu,
             #[cfg(windows)]
             "cpu_d3d12" => rfvp::app::embedded::Delivery::CpuD3D12,
@@ -139,7 +139,7 @@ unsafe fn open_impl(request: *const OpenRequest, gpu_host: *const D3D12Host, out
         let active = Active;
         let platform = Arc::new(platform::HostWindow { service: request.host.window, cancellation: request.host.cancellation,
             session_epoch: request.session_epoch, next_request: AtomicU64::new(1) });
-        let native = match NativeSession::open_with_delivery(root, nls, scale, platform.clone(), request.window.suspended != 0, delivery) {
+        let native = match NativeSession::open_with_delivery(root, config.nls, config.render_scale, config.translation_table, platform.clone(), request.window.suspended != 0, delivery) {
             Ok(native) => native,
             Err(_) if platform.is_cancelled() =>
                 return Ok(failure(error, CANCELLED, "RFVP_SESSION_CANCELLED", "native initialization cancelled")),
