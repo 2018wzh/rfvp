@@ -35,6 +35,8 @@ mod script;
 mod subsystem;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 mod text_codec;
+#[cfg(all(not(feature = "no_std"), feature = "gpu-render", feature = "subtitles"))]
+mod subtitles;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]
 mod perf;
 #[cfg(all(not(feature = "no_std"), feature = "gpu-render"))]

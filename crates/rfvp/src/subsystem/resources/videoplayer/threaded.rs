@@ -189,6 +189,8 @@ impl Mp4Playback {
 struct WmvRgbaFrame {
     pts_ms: u32,
     rgba: Vec<u8>,
+    #[cfg(feature = "subtitles")]
+    storage: (u32, u32),
 }
 
 impl std::fmt::Debug for WmvRgbaFrame {
@@ -310,6 +312,8 @@ impl WmvPlayback {
                         .send(WmvRgbaFrame {
                             pts_ms: fr.pts_ms,
                             rgba,
+                            #[cfg(feature = "subtitles")]
+                            storage: (fr.frame.width, fr.frame.height),
                         })
                         .is_err()
                     {
@@ -439,6 +443,8 @@ impl Drop for WmvPlayback {
 struct MpegRgbaFrame {
     pts_ms: i64,
     rgba: Vec<u8>,
+    #[cfg(feature = "subtitles")]
+    storage: (u32, u32),
 }
 
 impl std::fmt::Debug for MpegRgbaFrame {
@@ -567,6 +573,8 @@ impl MpegPlayback {
                             let _ = tx.send(MpegRgbaFrame {
                                 pts_ms: v.pts_ms,
                                 rgba,
+                                #[cfg(feature = "subtitles")]
+                                storage: (v.width, v.height),
                             });
                         }
                     });
@@ -595,6 +603,8 @@ impl MpegPlayback {
                         let _ = tx.send(MpegRgbaFrame {
                             pts_ms: v.pts_ms,
                             rgba,
+                            #[cfg(feature = "subtitles")]
+                            storage: (v.width, v.height),
                         });
                     }
                 });
@@ -1086,6 +1096,12 @@ fn stop_movie_audio(audio: &AudioManager) {
 
 #[cfg(feature = "mp4")]
 impl MovieSource for Mp4Playback {
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self) -> Option<u64> {
+        let elapsed = self.started_at?.elapsed().as_micros().min(i64::MAX as u128) as i64;
+        Some(self.base_pts_us?.saturating_add(elapsed).max(0) as u64 / 1000)
+    }
+
     fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
         if let Some(start) = self.started_at.as_mut() {
             *start += elapsed;
@@ -1104,6 +1120,8 @@ impl MovieSource for Mp4Playback {
             rgba: frame.data.into_vec(),
             width: frame.width,
             height: frame.height,
+            #[cfg(feature = "subtitles")]
+            presentation: super::Presentation { storage: (frame.width, frame.height), color: super::MovieColor::Unknown },
         }))
     }
 
@@ -1117,6 +1135,11 @@ impl MovieSource for Mp4Playback {
 }
 
 impl MovieSource for WmvPlayback {
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self) -> Option<u64> {
+        Some(u64::from(self.base_pts_ms?).saturating_add(self.started_at?.elapsed().as_millis().min(u64::MAX as u128) as u64))
+    }
+
     fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
         if let Some(start) = self.started_at.as_mut() {
             *start += elapsed;
@@ -1135,6 +1158,8 @@ impl MovieSource for WmvPlayback {
             rgba: frame.rgba,
             width: self.screen_w,
             height: self.screen_h,
+            #[cfg(feature = "subtitles")]
+            presentation: super::Presentation { storage: frame.storage, color: super::MovieColor::Bt601Tv },
         }))
     }
 
@@ -1148,6 +1173,12 @@ impl MovieSource for WmvPlayback {
 }
 
 impl MovieSource for MpegPlayback {
+    #[cfg(feature = "subtitles")]
+    fn position_ms(&self) -> Option<u64> {
+        let elapsed = self.started_at?.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        Some(self.base_pts_ms?.saturating_add(elapsed).max(0) as u64)
+    }
+
     fn resume_after(&mut self, elapsed: crate::platform_time::Duration) {
         if let Some(start) = self.started_at.as_mut() {
             *start += elapsed;
@@ -1166,6 +1197,8 @@ impl MovieSource for MpegPlayback {
             rgba: frame.rgba,
             width: self.screen_w,
             height: self.screen_h,
+            #[cfg(feature = "subtitles")]
+            presentation: super::Presentation { storage: frame.storage, color: super::MovieColor::Bt601Tv },
         }))
     }
 

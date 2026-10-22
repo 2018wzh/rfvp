@@ -51,6 +51,38 @@ If you want to run a translated game, currently we only support UTF-8 and GBK en
 * The translated game encrypts the translated assets.
 * Any other ways that the translated game differs from the original game in terms of data structure and format.
 
+The Astra embedded configuration also accepts `translation_table`, an optional game-root-relative
+path (at most 4096 UTF-8 bytes). The engine loads the read-only `AFVPTR1\0` table once at startup,
+checks the final HCB SHA-256, and validates strictly increasing offsets against actual `PushString`
+payload boundaries. Each matched UTF-8 string retains its original HCB offset identity; unmatched
+strings keep the configured script encoding. Tables with duplicate offsets, invalid UTF-8,
+embedded NULs, truncated records, or trailing data are rejected. The table stores both the source
+and final HCB hashes; only the final hash identifies the script loaded by the engine.
+
+Embedded builds enable the native `subtitles` feature. `subtitle_map` is an optional
+game-root-relative JSON path (4096-byte maximum):
+```json
+{"version":1,"tracks":[{"clock":"movie","resource":"movie/public.wmv","ass":"subtitle/public.ass","fonts":["subtitle/fonts/public.ttf"]}]}
+```
+Clocks are `movie` or `bgm`; resource matching follows the native ASCII-case-insensitive
+paths. ASS and explicit fonts are loaded read-only once. Movie timestamps come from
+the decoder's existing PTS clock; BGM timestamps come from the audio device handle.
+The latest mapped playback start owns the track. Stop/end removes it, restart replaces
+it, and a restored VM timeline invalidates the old renderer. Pausing adds no subtitle
+clock. Rendering uses the shared libass component, updates only changed subtitle masks,
+and draws through the existing sprite pipeline before the custom/system-page overlay,
+before CPU frame delivery. No game frame is copied for compositing.
+
+The Astra embedded core (C ABI v3) delivers frames only as CPU leases. The host chooses the
+raster size through `OpenRequest.render_extent` (declared range 160x90 to 8192x8192, aspect
+preserved): 0x0 keeps the logical size; otherwise the scale is `min(w / logical_w, h / logical_h)`
+clamped to 0.25-4.0, and the raster is the rounded scaled logical size.
+WMV/MPEG use their native decoder's actual BT.601-TV conversion and original decoded
+storage dimensions. Mapped MP4 subtitles reject unavailable color metadata rather than
+guessing from resolution. Unmapped media retain their existing playback behavior.
+Text fonts continue to use the existing `font/` directory and CJK fallback selection;
+ASS font selection comes only from each track's explicit `fonts` list.
+
 ### HOW TO BUILD
 * macOS Bundle: [setsumei/HOW-TO-BUILD.macos-bundle.md](setsumei/HOW-TO-BUILD.macos-bundle.md)
 * iOS IPA: [setsumei/HOW-TO-BUILD.ios.md](setsumei/HOW-TO-BUILD.ios.md)

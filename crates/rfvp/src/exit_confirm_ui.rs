@@ -122,6 +122,23 @@ impl ExitConfirmUi {
         self.outcome.take()
     }
 
+    pub fn handle_key(&mut self, key: PhysicalKey, pressed: bool, repeat: bool) -> bool {
+        if !self.active {
+            return false;
+        }
+        if pressed && !repeat {
+            match key {
+                PhysicalKey::Code(KeyCode::Escape) => self.cancel(),
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) =>
+                    self.confirm_selected(),
+                PhysicalKey::Code(KeyCode::ArrowLeft | KeyCode::ArrowUp | KeyCode::Tab |
+                    KeyCode::ArrowRight | KeyCode::ArrowDown) => self.toggle_selection(),
+                _ => {}
+            }
+        }
+        true
+    }
+
     pub fn handle_window_event(
         &mut self,
         event: &WindowEvent,
@@ -134,30 +151,7 @@ impl ExitConfirmUi {
 
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                if !event.state.is_pressed() || event.repeat {
-                    return true;
-                }
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => {
-                        self.cancel();
-                    }
-                    PhysicalKey::Code(KeyCode::Enter)
-                    | PhysicalKey::Code(KeyCode::NumpadEnter)
-                    | PhysicalKey::Code(KeyCode::Space) => {
-                        self.confirm_selected();
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowLeft)
-                    | PhysicalKey::Code(KeyCode::ArrowUp)
-                    | PhysicalKey::Code(KeyCode::Tab) => {
-                        self.toggle_selection();
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowRight)
-                    | PhysicalKey::Code(KeyCode::ArrowDown) => {
-                        self.toggle_selection();
-                    }
-                    _ => {}
-                }
-                true
+                self.handle_key(event.physical_key, event.state.is_pressed(), event.repeat)
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.hover =

@@ -101,6 +101,10 @@ pub struct Parser {
     game_title: String,
     pub syscall_count: u16,
     pub syscalls: SyscallMap,
+    #[cfg(not(feature = "old_school"))]
+    translation_table: Option<Arc<super::translation::TranslationTable>>,
+    #[cfg(feature = "old_school")]
+    translation_table: Option<super::translation::TranslationTable>,
 }
 
 /// See `Parser::window`.
@@ -117,6 +121,36 @@ struct FetchWindow {
 unsafe impl Sync for Parser {}
 
 impl Parser {
+    /// Install once at startup; every lookup subsequently uses the sorted immutable table.
+    pub fn set_translation_table(&mut self, bytes: &[u8]) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        anyhow::ensure!(self.translation_table.is_none(), "RFVP_TRANSLATION_ALREADY_LOADED");
+        let mut hash = Sha256::new();
+        #[cfg(not(feature = "old_school"))]
+        hash.update(self.buffer.as_slice());
+        #[cfg(feature = "old_school")]
+        {
+            let mut chunk = [0u8; 4096];
+            let mut offset = 0;
+            while offset < self.source.len() {
+                let len = chunk.len().min(self.source.len() - offset);
+                self.source.read_bytes(offset, &mut chunk[..len])?;
+                hash.update(&chunk[..len]);
+                offset += len;
+            }
+        }
+        let table = super::translation::TranslationTable::parse(bytes, self, &hash.finalize())?;
+        #[cfg(not(feature = "old_school"))]
+        { self.translation_table = Some(Arc::new(table)); }
+        #[cfg(feature = "old_school")]
+        { self.translation_table = Some(table); }
+        Ok(())
+    }
+
+    pub fn translated_string(&self, offset: u32) -> Option<&str> {
+        self.translation_table.as_ref()?.get(offset)
+    }
+
     /// `N` script bytes from `offset`, from the fetch window, refilling it if needed.
     #[cfg(feature = "old_school")]
     #[inline]
@@ -176,6 +210,7 @@ impl Parser {
                 game_title: String::new(),
                 syscall_count: 0,
                 syscalls: SyscallMap::default(),
+                translation_table: None,
             };
 
             uefi_parser_stage!("[UEFI] Parser::from_bytes before parser()");
@@ -219,6 +254,7 @@ impl Parser {
             game_title: String::new(),
             syscall_count: 0,
             syscalls: SyscallMap::default(),
+            translation_table: None,
         };
 
         parser.parser()?;
