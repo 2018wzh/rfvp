@@ -165,6 +165,33 @@ impl LegacySaveLoadUi {
         self.hover_cancel = false;
     }
 
+    pub fn handle_key(&mut self, key: PhysicalKey, pressed: bool, repeat: bool, game: &mut GameData) -> bool {
+        if !self.active {
+            return false;
+        }
+        if pressed && !repeat {
+            match key {
+                PhysicalKey::Code(KeyCode::Escape) => self.close(),
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) =>
+                    self.confirm(game),
+                PhysicalKey::Code(KeyCode::ArrowUp) => self.move_row(-1),
+                PhysicalKey::Code(KeyCode::ArrowDown) => self.move_row(1),
+                PhysicalKey::Code(KeyCode::ArrowLeft | KeyCode::PageUp) => self.move_page(-1),
+                PhysicalKey::Code(KeyCode::ArrowRight | KeyCode::PageDown) => self.move_page(1),
+                PhysicalKey::Code(KeyCode::Home) => {
+                    self.selected_row = 0;
+                    self.dirty = true;
+                }
+                PhysicalKey::Code(KeyCode::End) => {
+                    self.selected_row = UI_ROWS_PER_PAGE.saturating_sub(1);
+                    self.dirty = true;
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     pub fn handle_window_event(
         &mut self,
         event: &WindowEvent,
@@ -178,38 +205,7 @@ impl LegacySaveLoadUi {
 
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                if !event.state.is_pressed() || event.repeat {
-                    return true;
-                }
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => {
-                        self.close();
-                        return true;
-                    }
-                    PhysicalKey::Code(KeyCode::Enter)
-                    | PhysicalKey::Code(KeyCode::NumpadEnter)
-                    | PhysicalKey::Code(KeyCode::Space) => {
-                        self.confirm(game);
-                        return true;
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowUp) => self.move_row(-1),
-                    PhysicalKey::Code(KeyCode::ArrowDown) => self.move_row(1),
-                    PhysicalKey::Code(KeyCode::ArrowLeft) | PhysicalKey::Code(KeyCode::PageUp) => {
-                        self.move_page(-1)
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowRight)
-                    | PhysicalKey::Code(KeyCode::PageDown) => self.move_page(1),
-                    PhysicalKey::Code(KeyCode::Home) => {
-                        self.selected_row = 0;
-                        self.dirty = true;
-                    }
-                    PhysicalKey::Code(KeyCode::End) => {
-                        self.selected_row = UI_ROWS_PER_PAGE.saturating_sub(1);
-                        self.dirty = true;
-                    }
-                    _ => {}
-                }
-                return true;
+                return self.handle_key(event.physical_key, event.state.is_pressed(), event.repeat, game);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some((vx, vy)) =

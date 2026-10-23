@@ -644,7 +644,10 @@ impl Context {
         // intended return values and control flow.
         let addr = self.cursor as u32; // points to the first byte of the string payload
 
-        let s = parser.read_cstring(self.cursor, len)?;
+        let s = match parser.translated_string(addr) {
+            Some(text) => alloc::string::String::from(text),
+            None => parser.read_cstring(self.cursor, len)?,
+        };
         self.cursor += len;
 
         // log::info!("push_string: {}", &s);
@@ -1351,9 +1354,10 @@ impl Context {
                     self.id
                 );
                 self.backtrace();
-                #[cfg(feature = "no_std")]
+                // An embedding host shares this process: report a VM failure instead of exiting it.
+                #[cfg(any(feature = "no_std", feature = "embedded"))]
                 anyhow::bail!("unknown opcode: {:#02x} @ {:#08x}", opcode, self.cursor);
-                #[cfg(not(feature = "no_std"))]
+                #[cfg(not(any(feature = "no_std", feature = "embedded")))]
                 std::process::exit(1);
             }
         };

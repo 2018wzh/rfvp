@@ -293,6 +293,6 @@ pub unsafe extern "C" fn rfvp_android_destroy(handle: *mut c_void) {
     drop(Box::from_raw(handle as *mut App));
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "android-game-activity"))]
 #[no_mangle]
 pub unsafe extern "C" fn android_main(_app: *mut core::ffi::c_void) {}

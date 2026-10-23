@@ -8,7 +8,11 @@ use std::sync::Arc;
 fn parser(bytes: Vec<u8>) -> Parser {
     let mut parser = Parser::default();
     parser.buffer = Arc::new(bytes);
-    for (id, name, args) in [(0, "ThreadNext", 0), (1, "ThreadExit", 1)] {
+    for (id, name, args) in [
+        (0, "ThreadNext", 0),
+        (1, "ThreadExit", 1),
+        (2, "ExitMode", 1),
+    ] {
         parser.syscalls.insert(
             id,
             Syscall {
@@ -92,4 +96,34 @@ fn coroutine_restart_cancels_previous_text_waiters() {
             .collect_completed_sync_print_waiters(),
         vec![16]
     );
+}
+
+#[test]
+fn exit_mode_three_ends_the_game_only_after_its_context_returns() {
+    // push_i8 3; syscall ExitMode; ret
+    let mut parser = parser(vec![12, 3, 3, 2, 0, 4]);
+    let mut runner = VmRunner::new(ThreadManager::new());
+    runner.start_main(0);
+    let mut game = GameData::default();
+    runner.tick(&mut game, &mut parser, 16).unwrap();
+    // ExitMode(3) starts the exit sequence; the requesting context still runs it.
+    assert!(game.get_lock_scripter());
+    assert!(!game.get_main_thread_exited());
+    runner.tick(&mut game, &mut parser, 16).unwrap();
+    // `App::try_host_step` ends the session on exactly this pair of flags.
+    assert!(game.get_lock_scripter() && game.get_main_thread_exited());
+}
+
+#[test]
+fn a_returning_context_alone_does_not_end_the_game() {
+    let mut parser = parser(vec![4]);
+    let mut runner = VmRunner::new(ThreadManager::new());
+    runner.start_main(0);
+    let mut game = GameData::default();
+    runner.tick(&mut game, &mut parser, 16).unwrap();
+    assert_eq!(
+        runner.thread_manager().get_context_status(0),
+        ThreadState::CONTEXT_STATUS_NONE
+    );
+    assert!(!game.get_lock_scripter() && !game.get_main_thread_exited());
 }

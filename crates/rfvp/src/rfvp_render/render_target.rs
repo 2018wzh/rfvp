@@ -35,7 +35,7 @@ impl RenderTargetReadback {
         }
     }
 
-    pub(super) fn begin_mapping(&mut self) -> Result<(), &'static str> {
+    pub(crate) fn begin_mapping(&mut self) -> Result<(), &'static str> {
         if self.map_deadline.is_some() {
             return Err("RFVP_GPU_READBACK_PENDING");
         }
@@ -55,14 +55,14 @@ impl RenderTargetReadback {
         Ok(())
     }
 
-    pub(super) fn cancel_mapping(&mut self) {
+    pub(crate) fn cancel_mapping(&mut self) {
         let status = self.completion.swap(0, Ordering::AcqRel) & 3;
         if self.map_deadline.take().is_some() && status != 3 {
             self.buffer.unmap();
         }
     }
 
-    pub(super) fn poll_rgba8_into(&mut self, device: &wgpu::Device, out: &mut Vec<u8>) -> Result<bool, &'static str> {
+    pub(crate) fn poll_rgba8_into(&mut self, device: &wgpu::Device, out: &mut Vec<u8>) -> Result<bool, &'static str> {
         let deadline = self.map_deadline.ok_or("RFVP_GPU_READBACK_NOT_PENDING")?;
         device.poll(wgpu::Maintain::Poll);
         match self.completion.load(Ordering::Acquire) & 3 {
@@ -115,6 +115,9 @@ pub struct RenderTarget {
 
 impl RenderTarget {
     pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn texture(&self) -> &wgpu::Texture { &self.texture }
 
     pub fn new(
         resources: &GpuCommonResources,
@@ -252,6 +255,10 @@ impl RenderTarget {
 
     pub fn bind_group(&self) -> &TextureBindGroup {
         &self.bind_group
+    }
+
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
     }
 
     pub fn backing_size(&self) -> (u32, u32) {

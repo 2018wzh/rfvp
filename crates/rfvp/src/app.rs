@@ -85,6 +85,11 @@ use crate::subsystem::components::syscalls::legacy::{
 use crate::subsystem::components::syscalls::utils::take_pending_exit_dialog_request;
 use crate::subsystem::resources::motion_manager::DissolveType;
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi"), feature = "embedded"))]
+pub mod embedded;
+mod presentation;
+use presentation::PresentationTarget;
+
 // ----------------------------
 // GameData lock helpers
 // ----------------------------
@@ -157,7 +162,7 @@ pub struct App {
     render_target: RenderTarget,
     save_readback: Option<crate::rfvp_render::render_target::RenderTargetReadback>,
     resources: Arc<GpuCommonResources>,
-    surface: wgpu::Surface<'static>,
+    surface: PresentationTarget,
     surface_config: wgpu::SurfaceConfiguration,
 
     // Mobile hosts may need to recreate surfaces (Android SurfaceView lifecycle).
@@ -196,6 +201,8 @@ pub struct App {
     last_dissolve2_transitioning: bool,
     legacy_save_load_ui: LegacySaveLoadUi,
     exit_confirm_ui: ExitConfirmUi,
+    #[cfg(feature = "subtitles")]
+    subtitles: Option<crate::subtitles::Subtitles>,
     builtin_exit_ui_enabled: bool,
     pending_app_exit: bool,
 }
@@ -289,6 +296,9 @@ impl App {
     }
 
     fn desired_render_target_backing_size(&self) -> (u32, u32) {
+        if let PresentationTarget::Embedded(target) = &self.surface {
+            return target.backing_size();
+        }
         let scale = self.current_hidpi_scale();
         let w = ((self.virtual_size.0.max(1) as f32) * scale)
             .round()
@@ -772,6 +782,9 @@ impl App {
 
     fn apply_window_mode_requests(&mut self) {
         use winit::window::Fullscreen;
+        if matches!(self.surface, PresentationTarget::Embedded(_)) {
+            return; // The embedding platform bridge consumes and acknowledges this request.
+        }
 
         let requested = {
             let mut gd = gd_write(&self.game_data);
@@ -907,6 +920,25 @@ impl App {
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         self.sync_render_target_backing();
+        #[cfg(feature = "subtitles")]
+        if let Some(subtitles) = self.subtitles.as_mut() {
+            use crate::subtitles::{Clock, Media};
+            use crate::subsystem::resources::videoplayer::MovieColor;
+            use astra_subtitle::VideoColorSpace;
+            let gd = gd_read(&self.game_data);
+            let bgm: [Option<Media<'_>>; 4] = std::array::from_fn(|slot| {
+                gd.bgm_player_ref().playback(slot).map(|(resource, serial, position_ms)| Media {
+                    clock: Clock::Bgm, resource, serial, position_ms, storage: self.virtual_size,
+                    color: Some(VideoColorSpace::Rgb),
+                })
+            });
+            let movie = gd.video_manager.playback().map(|(resource, serial, position, presentation)| Media {
+                clock: Clock::Movie, resource, serial, position_ms: Some(position), storage: presentation.storage,
+                color: match presentation.color { MovieColor::Bt601Tv => Some(VideoColorSpace::Bt601Tv), MovieColor::Unknown => None },
+            });
+            subtitles.update(bgm.into_iter().flatten().chain(movie), self.vm_worker.timeline_epoch(),
+                self.virtual_size, self.render_target.backing_size(), &self.resources)?;
+        }
 
         // Commit a pending SaveWrite using a prepared in-memory payload (local_saved),
         // without capturing the current frame. This matches the original engine's
@@ -1112,6 +1144,11 @@ impl App {
                     .draw(&mut pass, mk_fill_src(), proj, color);
             }
 
+            #[cfg(feature = "subtitles")]
+            if let Some(subtitles) = &self.subtitles {
+                subtitles.draw(&mut pass, &self.resources.pipelines.sprite, proj);
+            }
+
             self.prim_renderer.draw_virtual_overlay(
                 &mut pass,
                 &self.resources.pipelines.sprite,
@@ -1126,34 +1163,32 @@ impl App {
                 .encode_readback_rgba8(&self.resources.device, &mut encoder, &mut self.save_readback)
         });
 
-        // Pass 2: present to the swapchain with aspect-preserving scaling.
-        let output = match self.surface.get_current_texture() {
-            Ok(o) => o,
-            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
-                // Recreate swapchain.
-                self.surface
-                    .configure(&self.resources.device, &self.surface_config);
-
-                return Ok(());
-            }
-            Err(wgpu::SurfaceError::Timeout) => {
-                // Skip a frame.
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
+        // Keep full UI output separate from SaveCreate and dissolve scene captures.
+        let output = match &self.surface {
+            PresentationTarget::Embedded(_) => None,
+            PresentationTarget::Window(surface) => match surface.get_current_texture() {
+                Ok(output) => Some(output),
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    surface.configure(&self.resources.device, &self.surface_config);
+                    return Ok(());
+                }
+                Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            },
         };
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let window_view = output.as_ref().map(|output| {
+            output.texture.create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let view = match &self.surface {
+            PresentationTarget::Embedded(target) => target.view(),
+            PresentationTarget::Window(_) => window_view.as_ref().expect("acquired window frame"),
+        };
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rfvp present pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -1283,7 +1318,9 @@ impl App {
             }
         }
 
-        output.present();
+        if let Some(output) = output {
+            output.present();
+        }
 
         Ok(())
     }
@@ -1599,11 +1636,21 @@ impl App {
     ///
     /// Returns `true` if the engine requested exit.
     pub fn host_step(&mut self, dt_ms: u32) -> bool {
+        match self.try_host_step(dt_ms) {
+            Ok(exited) => exited,
+            Err(error) => {
+                log::error!("host_step failed: {error:#}");
+                true
+            }
+        }
+    }
+
+    pub fn try_host_step(&mut self, dt_ms: u32) -> Result<bool> {
         // Exit once the main script thread is done and the engine requested shutdown.
         {
             let gd = gd_read(&self.game_data);
             if gd.get_lock_scripter() && gd.get_main_thread_exited() {
-                return true;
+                return Ok(true);
             }
         }
 
@@ -1629,8 +1676,16 @@ impl App {
         if notify_dissolve_done {
             self.vm_worker.send_dissolve_done_sync();
         }
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+        anyhow::ensure!(!self.vm_worker.is_cancelled(), "RFVP_SESSION_CANCELLED");
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+        anyhow::ensure!(!self.vm_worker.has_failed(), "RFVP_VM_FAILED");
 
         let _rep = self.vm_worker.send_frame_ms_sync(frame_ms);
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+        anyhow::ensure!(!self.vm_worker.is_cancelled(), "RFVP_SESSION_CANCELLED");
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "uefi")))]
+        anyhow::ensure!(!self.vm_worker.has_failed(), "RFVP_VM_FAILED");
 
         // Match the original engine: script contexts run before text and motion updates.
         self.finish_frame();
@@ -1646,16 +1701,14 @@ impl App {
                 .apply_scene_action(SceneAction::EndFrame, &mut *gd);
         }
 
-        if let Err(e) = self.render_frame() {
-            log::error!("host_step: render_frame failed: {e:?}");
-        }
+        self.render_frame()?;
 
         {
             let mut gd = gd_write(&self.game_data);
             gd.inputs_manager.frame_reset();
         }
 
-        false
+        Ok(self.pending_app_exit)
     }
 
     /// Resize the presentation surface in host-driven mode.
@@ -2096,7 +2149,7 @@ impl App {
             std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(new_surface)
         };
 
-        self.surface = new_surface;
+        self.surface = new_surface.into();
 
         let caps = self.surface.get_capabilities(adapter);
         if !caps.formats.is_empty() {
@@ -2130,7 +2183,8 @@ impl App {
 #[cfg(target_os = "android")]
 impl Drop for App {
     fn drop(&mut self) {
-        {
+        self.vm_worker.shutdown();
+        if !matches!(self.surface, PresentationTarget::Embedded(_)) {
             let gd = gd_read(&self.game_data);
             if let Err(e) = crate::subsystem::global_savedata::save_global_savedata_v1(&gd) {
                 log::error!("Failed to save global savedata on exit: {:#}", e);
@@ -2147,6 +2201,9 @@ impl Drop for App {
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 impl Drop for App {
     fn drop(&mut self) {
+        #[cfg(not(target_os = "uefi"))]
+        self.vm_worker.shutdown();
+        if matches!(self.surface, PresentationTarget::Embedded(_)) { return; }
         let gd = gd_read(&self.game_data);
         if let Err(e) = crate::subsystem::global_savedata::save_global_savedata_v1(&gd) {
             log::error!("Failed to save global savedata on exit: {:#}", e);
@@ -2875,7 +2932,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
                 ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
-                ptr::addr_of_mut!((*p).surface).write(surface);
+                ptr::addr_of_mut!((*p).surface).write(surface.into());
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
 
                 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -2894,6 +2951,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3066,7 +3125,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
                 ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
-                ptr::addr_of_mut!((*p).surface).write(surface);
+                ptr::addr_of_mut!((*p).surface).write(surface.into());
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
 
                 ptr::addr_of_mut!((*p).prim_renderer).write(prim_renderer);
@@ -3080,6 +3139,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3268,7 +3329,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
                 ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
-                ptr::addr_of_mut!((*p).surface).write(surface);
+                ptr::addr_of_mut!((*p).surface).write(surface.into());
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
 
                 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -3292,6 +3353,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
@@ -3463,7 +3526,7 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).render_target).write(render_target);
                 ptr::addr_of_mut!((*p).save_readback).write(None);
                 ptr::addr_of_mut!((*p).resources).write(resources.clone());
-                ptr::addr_of_mut!((*p).surface).write(surface);
+                ptr::addr_of_mut!((*p).surface).write(surface.into());
                 ptr::addr_of_mut!((*p).surface_config).write(surface_config);
 
                 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -3488,6 +3551,8 @@ impl AppBuilder {
                 ptr::addr_of_mut!((*p).last_dissolve2_transitioning).write(false);
                 ptr::addr_of_mut!((*p).legacy_save_load_ui).write(legacy_save_load_ui);
                 ptr::addr_of_mut!((*p).exit_confirm_ui).write(exit_confirm_ui);
+                #[cfg(feature = "subtitles")]
+                ptr::addr_of_mut!((*p).subtitles).write(None);
                 ptr::addr_of_mut!((*p).builtin_exit_ui_enabled).write(builtin_exit_ui_enabled);
                 ptr::addr_of_mut!((*p).pending_app_exit).write(false);
 
