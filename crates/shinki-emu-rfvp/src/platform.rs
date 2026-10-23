@@ -1,5 +1,5 @@
-use astra_emu_abi::*;
 use rfvp::app::embedded::session::{Platform, PointerRequest};
+use shinki_emu_abi::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct HostWindow {

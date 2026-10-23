@@ -51,7 +51,7 @@ If you want to run a translated game, currently we only support UTF-8 and GBK en
 * The translated game encrypts the translated assets.
 * Any other ways that the translated game differs from the original game in terms of data structure and format.
 
-The Astra embedded configuration also accepts `translation_table`, an optional game-root-relative
+The Shinki embedded configuration also accepts `translation_table`, an optional game-root-relative
 path (at most 4096 UTF-8 bytes). The engine loads the read-only `AFVPTR1\0` table once at startup,
 checks the final HCB SHA-256, and validates strictly increasing offsets against actual `PushString`
 payload boundaries. Each matched UTF-8 string retains its original HCB offset identity; unmatched
@@ -73,7 +73,7 @@ clock. Rendering uses the shared libass component, updates only changed subtitle
 and draws through the existing sprite pipeline before the custom/system-page overlay,
 before CPU frame delivery. No game frame is copied for compositing.
 
-The Astra embedded core (C ABI v3) delivers frames only as CPU leases. The host chooses the
+The Shinki embedded core (C ABI v3) delivers frames only as CPU leases. The host chooses the
 raster size through `OpenRequest.render_extent` (declared range 160x90 to 8192x8192, aspect
 preserved): 0x0 keeps the logical size; otherwise the scale is `min(w / logical_w, h / logical_h)`
 clamped to 0.25-4.0, and the raster is the rounded scaled logical size.
@@ -158,3 +158,20 @@ Ensuring 100% compatibility requires testing against all related games. If you f
 
 ### License
 This project is licensed under the MPL-2.0 License. See the [LICENSE](LICENSE) file for details.
+
+### ShinkiEMU adapter
+
+`crates/shinki-emu-rfvp` embeds the native RFVP runtime through ShinkiEMU C ABI v3.
+From the ShinkiEMU checkout, run:
+
+```sh
+cargo xtask build --target x86_64-pc-windows-msvc --core rfvp --release
+```
+
+The adapter's `build.rs` records its ABI, target, profile and license inputs in
+`OUT_DIR/core-build.json`; Cargo builds the real `shinki_emu_rfvp.dll` with the
+`dynamic-plugin-export` feature and exports `shinki_emu_query`.
+See [modifications](crates/shinki-emu-rfvp/MODIFICATIONS.md) and
+[third-party notices](crates/shinki-emu-rfvp/THIRD_PARTY_NOTICES.md) for source pins,
+native prerequisites and distribution terms. The upstream platform table above
+describes RFVP itself, not the standalone ShinkiEMU adapter.

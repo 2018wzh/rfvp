@@ -31,7 +31,7 @@ required-features = ["gpu-render"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
-astra-subtitle = { git = "https://github.com/2018wzh/AstraEngine.git", rev = "6d9d691dcc8f3d768e40b5be1d6f37366cca62d8", optional = true }
+roukaku-subtitle = { git = "https://github.com/Project-Shinkirou/RoukakuEngine", rev = "ba28948b5dd00188fe53a24881a64dcaf0c69e2a", optional = true }
 anyhow = { version = "1.0.79", default-features = false, optional = true }
 encoding_rs = { version = "0.8.33", optional = true }
 log = { version = "0.4.20", optional = true }
@@ -108,7 +108,7 @@ anzu-hal = { path = "../anzu-hal", optional = true }
 # Keep native movie support enabled by default for backward compatibility.
 default = ["runtime-core-deps", "gpu-render", "android-game-activity", "audio", "mp4", "native-video", "random", "uuid-support", "image-formats", "bevy-utils", "fontdue-compat", "cursor-ani", "zlib-flate2", "logging", "mimalloc"]
 embedded = ["dep:parking_lot", "subtitles"]
-subtitles = ["runtime-core-deps", "gpu-render", "dep:astra-subtitle"]
+subtitles = ["runtime-core-deps", "gpu-render", "dep:roukaku-subtitle"]
 
 # mimalloc as the global allocator (desktop and mobile; never with `no_std`).
 mimalloc = ["dep:mimalloc"]
@@ -204,7 +204,7 @@ runtime-core-deps = [
 gpu-render = ["runtime-core-deps", "dep:clap", "dep:winit", "dep:wgpu", "dep:egui", "dep:egui-wgpu", "dep:ndk-context", "random", "cursor-ani", "zlib-flate2", "logging"]
 
 # Standalone Android launcher glue (GameActivity + the `android_main` stub).
-# Hosts that own the activity (AstraEMU uses NativeActivity) leave it off: a
+# Hosts that own the activity (ShinkiEMU uses NativeActivity) leave it off: a
 # process may link exactly one android-activity backend and one `android_main`.
 android-game-activity = ["dep:android-activity"]
 
@@ -313,7 +313,7 @@ uefi-native-video = [
 mp4 = ["runtime-core-deps", "dep:mp4", "dep:video-sys", "dep:symphonia", "dep:symphonia-core"]
 
 [target.'cfg(not(target_os = "uefi"))'.dependencies]
-kira = { git = "https://github.com/2018wzh/kira.git", rev = "d2f10db15d9c451c7b2fd33043ae7732e75bee5d", version = "0.10.8", optional = true }
+kira = { git = "https://github.com/Project-Shinkirou/kira.git", rev = "d2f10db15d9c451c7b2fd33043ae7732e75bee5d", version = "0.10.8", optional = true }
 symphonia-core = { version = "0.5.5", default-features = false, optional = true }
 symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"], optional = true }
 mp4 = { version = "0.14.0", optional = true }

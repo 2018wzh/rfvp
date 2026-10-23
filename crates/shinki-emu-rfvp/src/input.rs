@@ -1,5 +1,5 @@
-use astra_emu_abi::*;
 use rfvp::app::embedded::session::Input;
+use shinki_emu_abi::*;
 use winit::{
     dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},

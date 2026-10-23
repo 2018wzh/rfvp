@@ -3,7 +3,6 @@ mod config;
 mod input;
 mod platform;
 
-use astra_emu_abi::*;
 use rfvp::app::embedded::session::Platform;
 use rfvp::{
     app::{
@@ -12,6 +11,7 @@ use rfvp::{
     },
     script::parser::{Nls, Parser},
 };
+use shinki_emu_abi::*;
 use std::{
     ffi::c_void,
     path::Path,
@@ -92,13 +92,13 @@ fn surface(native: &NativeSession) -> SurfaceInfo {
 fn initialized() -> anyhow::Result<()> {
     anyhow::ensure!(
         INITIALIZED.load(Ordering::Acquire),
-        "ASTRA_EMU_FAMILY_DIAGNOSTIC_INIT"
+        "SHINKI_EMU_FAMILY_DIAGNOSTIC_INIT"
     );
     Ok(())
 }
 
 unsafe extern "C" fn initialize(diagnostics: *const Diagnostics, error: *mut Error) -> Status {
-    boundary(error, "ASTRA_EMU_FAMILY_DIAGNOSTIC_INIT", || {
+    boundary(error, "SHINKI_EMU_FAMILY_DIAGNOSTIC_INIT", || {
         let diagnostics = unsafe { diagnostics.as_ref() }
             .ok_or_else(|| anyhow::anyhow!("missing diagnostic sink"))?;
         anyhow::ensure!(
@@ -108,7 +108,7 @@ unsafe extern "C" fn initialize(diagnostics: *const Diagnostics, error: *mut Err
             "invalid diagnostic sink"
         );
         #[cfg(feature = "dynamic-plugin-export")]
-        unsafe { astra_emu_abi::diagnostic_bridge::install(*diagnostics) }.map_err(|status| {
+        unsafe { shinki_emu_abi::diagnostic_bridge::install(*diagnostics) }.map_err(|status| {
             anyhow::anyhow!("diagnostic bridge initialization failed: {status}")
         })?;
         // Static linkage uses the host's subscriber, never installs a second logger.
@@ -512,7 +512,7 @@ static API: CoreApi = CoreApi {
 /// # Safety
 /// `output` is writable storage for a single table pointer.
 #[cfg_attr(feature = "dynamic-plugin-export", no_mangle)]
-pub unsafe extern "C" fn astra_emu_query(version: u32, output: *mut *const CoreApi) -> Status {
+pub unsafe extern "C" fn shinki_emu_query(version: u32, output: *mut *const CoreApi) -> Status {
     if output.is_null() {
         return INVALID_ARGUMENT;
     }
@@ -624,7 +624,7 @@ mod tests {
         .cast();
 
         let mut api = std::ptr::null();
-        assert_eq!(unsafe { astra_emu_query(ABI_VERSION, &mut api) }, OK);
+        assert_eq!(unsafe { shinki_emu_query(ABI_VERSION, &mut api) }, OK);
         let api = unsafe { &*api };
         let read_state = || {
             let mut state = SessionState {

@@ -20,4 +20,4 @@ exclude = ["platform/psp/patches"]
 # psp with its per-allocation kernel allocator made optional; see platform/psp/patches/README.md.
 [patch.crates-io]
 psp = { path = "platform/psp/patches/psp" }
-cpal = { git = "https://github.com/2018wzh/cpal.git", rev = "65ac8a6ac1a635cc26bfc5af331295b052044908" }
+cpal = { git = "https://github.com/Project-Shinkirou/cpal.git", rev = "65ac8a6ac1a635cc26bfc5af331295b052044908" }

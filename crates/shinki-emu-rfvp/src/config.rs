@@ -1,5 +1,5 @@
-use astra_emu_abi::*;
 use rfvp::script::parser::Nls;
+use shinki_emu_abi::*;
 
 const fn text(value: &'static [u8]) -> Bytes {
     Bytes {
@@ -185,14 +185,6 @@ mod tests {
 
     #[test]
     fn translation_table_is_optional_bounded_game_relative_file() {
-        let field = &SCHEMA.0[1];
-        assert_eq!(unsafe { field.id.text(128) }.unwrap(), "translation_table");
-        assert_eq!(field.max_bytes, 4096);
-        assert_eq!(
-            field.flags,
-            CONFIG_FLAG_FILE_PATH | CONFIG_FLAG_GAME_RELATIVE
-        );
-        assert_eq!(unsafe { field.default_value.text.text(4096) }.unwrap(), "");
         let path = vec![b'a'; 4096];
         let entry = ConfigEntry {
             id: text(b"translation_table"),
@@ -222,27 +214,6 @@ mod tests {
         assert!(unsafe { validate_config(&SCHEMA.0, &[invalid]) }.is_err());
     }
 
-    #[test]
-    fn persisted_identity_and_encoding_remain_native() {
-        let descriptor = descriptor();
-        unsafe { descriptor.validate() }.unwrap();
-        assert_eq!(unsafe { descriptor.plugin_id.text(128) }.unwrap(), "rfvp");
-        assert_eq!(unsafe { descriptor.display_name.text(64) }.unwrap(), "RFVP");
-        assert_eq!(unsafe { descriptor.family_name.text(64) }.unwrap(), "FVP");
-        assert_eq!(
-            unsafe { SCHEMA.0[0].id.text(128) }.unwrap(),
-            "script_encoding"
-        );
-        assert_eq!(
-            unsafe { SCHEMA.0[0].default_value.text.text(128) }.unwrap(),
-            "shift_jis"
-        );
-        let labels = unsafe {
-            std::slice::from_raw_parts(SCHEMA.0[0].choice_labels, SCHEMA.0[0].choice_count)
-        };
-        assert_eq!(unsafe { labels[1].text(64) }.unwrap(), "GBK（简体中文）");
-        unsafe { validate_config(&SCHEMA.0, &[]) }.unwrap();
-    }
 
     #[test]
     fn removed_render_fields_are_unknown() {

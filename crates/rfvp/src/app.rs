@@ -924,7 +924,7 @@ impl App {
         if let Some(subtitles) = self.subtitles.as_mut() {
             use crate::subtitles::{Clock, Media};
             use crate::subsystem::resources::videoplayer::MovieColor;
-            use astra_subtitle::VideoColorSpace;
+            use roukaku_subtitle::VideoColorSpace;
             let gd = gd_read(&self.game_data);
             let bgm: [Option<Media<'_>>; 4] = std::array::from_fn(|slot| {
                 gd.bgm_player_ref().playback(slot).map(|(resource, serial, position_ms)| Media {

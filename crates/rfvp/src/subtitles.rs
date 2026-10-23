@@ -1,7 +1,7 @@
 //! ASS tracks owned by the rendering thread, driven only by native media clocks.
 use std::{collections::BTreeMap, fs::File, io::Read, path::{Component, Path, PathBuf}, sync::Arc};
 use anyhow::{ensure, Result};
-use astra_subtitle::{AssRenderer, BitmapRun, FontData, FrameChange, VideoColorSpace};
+use roukaku_subtitle::{AssRenderer, BitmapRun, FontData, FrameChange, VideoColorSpace};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use image::{DynamicImage, RgbaImage};
 use serde::Deserialize;
@@ -220,7 +220,7 @@ mod tests {
     fn mask_upload_reads_only_coverage_and_combines_inverted_ass_alpha_once() {
         let alpha = [255, 128, 17, 18, 0, 64];
         let run = BitmapRun { x: 0, y: 0, w: 2, h: 2, stride: 4, color: 0xff000080, alpha: &alpha };
-        let rgba = run.rgba_for_video(astra_subtitle::YcbcrMatrix::None, VideoColorSpace::Rgb).unwrap();
+        let rgba = run.rgba_for_video(roukaku_subtitle::YcbcrMatrix::None, VideoColorSpace::Rgb).unwrap();
         assert_eq!(rgba, [255,0,0,127]);
         let mut image = RgbaImage::new(2,2);
         write_mask(&mut image, run, [255,0,0]);
