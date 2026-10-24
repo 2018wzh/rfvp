@@ -6,7 +6,7 @@
 - `shinki` 分支 = 通用原生修复基线 `3359d8fbea3c53d6d262a9f71b6d4d79888c2368` + 一个适配提交 `feat(shinki): ShinkiEMU C ABI v3 adapter shinki-emu-rfvp`。基线含原生生命周期修复 `7e2016a0e0ef1c0b102185914cc7a8459bb2c9e1` 与原生音频 worker 所有权接入，与适配分开。
 - 适配提交合并了此前的 C ABI v3 移植、原偏移翻译表、movie/BGM ASS 字幕、读档 epoch 修复、ABI pin 与 plugin ID 更名；合并前的历史保留在 [`1e947a5ccbd2c7a698bd30d48347454ef1b908a9`](https://github.com/Project-Shinkirou/rfvp/commit/1e947a5ccbd2c7a698bd30d48347454ef1b908a9) 等旧引用中，旧 tree 不代表当前构建源码。
 - 适配包为 `crates/shinki-emu-rfvp`（package `shinki-emu-rfvp`，lib `shinki_emu_rfvp`），是 ShinkiEMU 唯一的 RFVP 适配。
-- 适配包的 `shinki-emu-abi`（C ABI v3）与构建辅助 `shinki-emu-build` 固定 `Project-Shinkirou/ShinkiEMU@cb8d9dd22d7d0ab129085b324c94d6dc81fa19e3`；原生 `rfvp` 的可选 `roukaku-subtitle` 固定 `Project-Shinkirou/RoukakuEngine@ba28948b5dd00188fe53a24881a64dcaf0c69e2a`。
+- 适配包的 `shinki-emu-abi`（C ABI v3）与构建辅助 `shinki-emu-build` 固定 `Project-Shinkirou/ShinkiEMU@cb8d9dd22d7d0ab129085b324c94d6dc81fa19e3`；原生 `rfvp` 的可选 `roukaku-subtitle` 固定 `Project-Shinkirou/RoukakuEngine@341d3dc8d5ed79170cc7b3b197f8f65093356a9f`。
 - Kira 运行层保持 0.10.8，固定 [`Project-Shinkirou/kira@d2f10db15d9c451c7b2fd33043ae7732e75bee5d`](https://github.com/Project-Shinkirou/kira/commit/d2f10db15d9c451c7b2fd33043ae7732e75bee5d)，不改 mixer 运行实现；workspace `[patch.crates-io]` 的 CPAL 0.15.3 固定 `Project-Shinkirou/cpal@65ac8a6ac1a635cc26bfc5af331295b052044908`。
 
 ## 适配内容
