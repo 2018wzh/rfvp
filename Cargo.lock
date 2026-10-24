@@ -1505,6 +1505,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "ecolor"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5394,7 +5400,7 @@ dependencies = [
 [[package]]
 name = "shinki-emu-abi"
 version = "0.1.0"
-source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=035155c78761768bc088169a4eca982f82e9d577#035155c78761768bc088169a4eca982f82e9d577"
+source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=9cd899babbb54cbc84c3e9fbddfe192c2f9200c8#9cd899babbb54cbc84c3e9fbddfe192c2f9200c8"
 dependencies = [
  "tracing",
  "tracing-log",
@@ -5404,10 +5410,11 @@ dependencies = [
 [[package]]
 name = "shinki-emu-build"
 version = "0.1.0"
-source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=035155c78761768bc088169a4eca982f82e9d577#035155c78761768bc088169a4eca982f82e9d577"
+source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=9cd899babbb54cbc84c3e9fbddfe192c2f9200c8#9cd899babbb54cbc84c3e9fbddfe192c2f9200c8"
 dependencies = [
  "anyhow",
  "cc",
+ "dunce",
  "object",
  "serde",
  "serde_json",
